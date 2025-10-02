@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>主控界面</title>
+
+  <!-- 页面级防缓存（配合 main.py 的响应头，双保险） -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <style>
+    :root{
+      --bg:#0b1221; --panel:#121a2b; --panel-2:#0f1626;
+      --text:#e7eefc; --muted:#8aa0c6; --accent:#38bdf8;
+      --ok:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --radius: 14px; --border: 1px solid #1f2b45;
+    }
+    *{box-sizing:border-box}
+    html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--text);
+      font-family: system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial,"Noto Sans","PingFang SC","Microsoft YaHei UI",sans-serif;}
+    .topbar{position:fixed;left:18px;right:18px;top:14px;display:flex;align-items:center;gap:12px;z-index:10}
+    .badge{background:linear-gradient(135deg,#1e293b,#0b1221);padding:10px 16px;border-radius:999px;border:var(--border);box-shadow:var(--shadow)}
+    .badge h1{margin:0;font-size:24px;letter-spacing:.5px}
+    .pill{display:inline-flex;align-items:center;gap:8px;background:#0e1628;border:1px solid #243149;border-radius:999px;padding:6px 10px;color:#cfe0ff;font-size:20px}
+    .btn{cursor:pointer;user-select:none;background:#0e1628;border:1px solid #26334d;border-radius:10px;padding:8px 12px;color:#dbe7ff;transition:transform .06s ease,background .2s}
+    .btn:hover{background:#13203a}
+    .btn:active{transform:scale(.98)}
+    #layout{position:fixed;inset:74px 18px 18px 18px;display:flex;flex-direction:column;gap:12px}
+    #mainDisplay {height:74%;width:100%;background:var(--panel);border:var(--border);border-radius:var(--radius);
+      box-shadow:var(--shadow);overflow:hidden;position:relative;padding:10px;}
+    .content-panel {width:100%;height:100%;display:none;background:var(--panel-2);border-radius:calc(var(--radius) - 6px);overflow:hidden;border:1px solid #1e2a43;}
+    .content-panel.active{display:block}
+    iframe{width:100%;height:100%;border:none;background:#000}
+    #subDisplays{height:26%;display:flex;gap:10px;background:transparent}
+    .sub-window{flex:1;background:var(--panel);border-radius:var(--radius);overflow:hidden;cursor:pointer;border:var(--border);box-shadow:var(--shadow);position:relative}
+    .sub-window iframe{width:100%;height:100%;pointer-events:none}
+    .tag{position:absolute;left:10px;top:10px;font-size:20px;background:#0e1628;border:1px solid #243149;padding:4px 8px;border-radius:999px;color:#cfe0ff}
+    @media (max-width: 980px){ #mainDisplay{height:64%} #subDisplays{height:36%} }
+  </style>
+</head>
+<body>
+  <!-- 顶部栏 -->
+  <div class="topbar">
+    <div class="badge"><h1>路径规划通过性验证系统</h1></div>
+    <span class="pill"></span>
+
+    <!-- 面板切换按钮（保留原功能） -->
+    <button class="btn" onclick="switchPanel('panel1')">驾驶视角</button>
+    <button class="btn" onclick="switchPanel('panel2')">地图加载</button>
+    <button class="btn" onclick="switchPanel('panel3')">通行区域</button>
+    <button class="btn" onclick="switchPanel('panel4')">路径规划</button>
+    <button class="btn" onclick="switchPanel('panel5')">通行验证</button>
+    <button class="btn" onclick="switchPanel('panel6')">数据分析</button>
+
+    <!-- 一键清理本地缓存（SW/Cache/Storage） -->
+    <button class="btn" onclick="purgeCaches()">清理本地缓存</button>
+  </div>
+
+  <!-- 主体布局 -->
+  <div id="layout">
+    <div id="mainDisplay">
+      <!-- 主显示区面板 -->
+      <div id="panel1" class="content-panel active"><iframe src="camera.html" title="camera"></iframe></div>
+
+      <!-- 重要：不再加载地图，src 置空（保留面板壳子以兼容现有逻辑） -->
+      <div id="panel2" class="content-panel"><iframe src="googlemaps.html" title="map"></iframe></div>
+
+      <div id="panel3" class="content-panel"><iframe src="" title="tif"></iframe></div>
+      <div id="panel4" class="content-panel"><iframe src="panel4.html" title="panel4"></iframe></div>
+      <div id="panel5" class="content-panel"><iframe src="panel5.html" title="panel5"></iframe></div>
+      <div id="panel6" class="content-panel"><iframe src="panel6.html" title="panel6"></iframe></div>
+    </div>
+
+    <!-- 子窗口区域（双击切换主显示） -->
+    <div id="subDisplays">
+      <div class="sub-window" ondblclick="switchPanel('panel1')">
+        <span class="tag">驾驶视角</span>
+        <iframe src="camera.html" title="camera-mini"></iframe>
+      </div>
+
+      <!-- 重要：子窗口也不再加载地图 -->
+      <div class="sub-window" ondblclick="switchPanel('panel2')">
+        <span class="tag">地图加载</span>
+        <iframe src="googlemaps.html" title="map-mini"></iframe>
+      </div>
+
+      <div class="sub-window" ondblclick="switchPanel('panel3')">
+        <span class="tag">路径规划</span>
+        <iframe src="" title="tif-mini"></iframe>
+      </div>
+      <div class="sub-window" ondblclick="switchPanel('panel4')">
+        <span class="tag">通行区域</span>
+        <iframe src="" title="p4-mini"></iframe>
+      </div>
+      <div class="sub-window" ondblclick="switchPanel('panel5')">
+        <span class="tag">通行验证</span>
+        <iframe src="" title="p5-mini"></iframe>
+      </div>
+      <div class="sub-window" ondblclick="switchPanel('panel6')">
+        <span class="tag">数据分析</span>
+        <iframe src="" title="p6-mini"></iframe>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 面板切换：保留原逻辑
+    function switchPanel(id) {
+      document.querySelectorAll('.content-panel').forEach(p => p.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    // 键盘 1~6 快速切换
+    window.addEventListener('keydown', (e)=>{
+      if(e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      const k = e.key;
+      if(k>='1' && k<='6') switchPanel('panel'+k);
+    });
+
+    // 自动给非空 iframe 的 URL 追加时间戳，避免命中历史缓存
+    (function bustIframeCache(){
+      const ts = Date.now();
+      document.querySelectorAll('iframe').forEach(f => {
+        const src = f.getAttribute('src');
+        if (!src) return; // 空的就不处理（比如已经禁用的地图）
+        try {
+          const url = new URL(src, location.href);
+          url.searchParams.set('_ts', ts);
+          f.src = url.toString();
+        } catch (e) {
+          // 非法 URL 忽略
+        }
+      });
+    })();
+
+    // 一键清理：Service Worker、Cache Storage、localStorage、sessionStorage
+    async function purgeCaches(){
+      try {
+        if ('serviceWorker' in navigator) {
+          const regs = await navigator.serviceWorker.getRegistrations();
+          for (const r of regs) await r.unregister();
+        }
+        if (window.caches && caches.keys) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map(k => caches.delete(k)));
+        }
+        localStorage.clear();
+        sessionStorage.clear();
+        alert('已清理本地缓存，建议刷新页面（Ctrl+F5）。');
+      } catch (e) {
+        console.error(e);
+        alert('清理时出现问题，请打开控制台查看。');
+      }
+    }
+  </script>
+</body>
+</html>

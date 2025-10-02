@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>摄像头</title>
+  <style>html, body, video { margin: 0; height: 100%; width: 100%; object-fit: cover; }</style>
+</head>
+<body>
+  <video autoplay muted playsinline id="cam"></video>
+  <script>
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => {
+        document.getElementById('cam').srcObject = stream;
+      })
+      .catch(err => {
+        document.body.innerHTML = "<h2 style='color:white;'>摄像头访问失败</h2>";
+        console.error(err);
+      });
+  </script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>地图模块 - 2D/3D/卫星切换</title>
+  <style>
+    html, body, #map {
+      margin: 0;
+      height: 100%;
+    }
+    .map-type-selector {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 999;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 6px;
+      border-radius: 6px;
+      box-shadow: 0 0 6px rgba(0, 0, 0, 0.2);
+    }
+  </style>
+  <script src="https://webapi.amap.com/maps?v=2.0&key=beb4a057b1dc2db77a37588f006bb87f"></script>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="map-type-selector">
+    <label><input type="radio" name="mapType" value="2D" checked> 2D地图</label><br>
+    <label><input type="radio" name="mapType" value="3D"> 3D地图</label><br>
+    <label><input type="radio" name="mapType" value="satellite"> 卫星图</label>
+  </div>
+
+  <script>
+    window.onload = function () {
+      if (typeof AMap === "undefined") {
+        document.body.innerHTML = "<h2 style='color:white;'>❌ 高德地图加载失败，请检查网络或 API key</h2>";
+        return;
+      }
+
+      // 初始化地图
+      let map = new AMap.Map('map', {
+        center: [116.397, 39.918],
+        zoom: 12,
+        viewMode: '2D' // 初始为 2D 模式
+      });
+
+      // 添加默认 marker
+      const marker = new AMap.Marker({ position: [116.397, 39.918] });
+      map.add(marker);
+
+      // 卫星图层（默认隐藏）
+      const satelliteLayer = new AMap.TileLayer.Satellite({ zIndex: 10 });
+      const roadNetLayer = new AMap.TileLayer.RoadNet({ zIndex: 11 });
+
+      // 切换地图类型
+      document.querySelectorAll('input[name="mapType"]').forEach(radio => {
+        radio.addEventListener('change', function () {
+          const type = this.value;
+
+          if (type === "2D") {
+            map.setLayers([]);
+            map.setFeatures(['bg', 'road', 'building']);
+            map.setViewMode('2D');
+          } else if (type === "3D") {
+            map.setLayers([]);
+            map.setFeatures(['bg', 'road', 'building']);
+            map.setViewMode('3D');
+          } else if (type === "satellite") {
+            map.setLayers([satelliteLayer, roadNetLayer]);
+            map.setViewMode('2D'); // 卫星图默认使用 2D 模式
+          }
+        });
+      });
+    };
+  </script>
+</body>
+</html>

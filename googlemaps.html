@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>Cesium 影像叠加 + 实时定位（目录轮询 test_data/）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/cesium@1.114.0/Build/Cesium/Widgets/widgets.css">
+  <style>
+    :root{ --bg:#0b1221; --panel:#121a2b; --muted:#8aa0c6; --text:#e7eefc; --border:#263247; --accent:#38bdf8; }
+    html, body, #cesiumContainer { width:100%; height:100%; margin:0; padding:0; overflow:hidden; background:var(--bg); }
+    .chrome{ position:fixed; inset:12px; z-index:10; pointer-events:none; }
+    .card{ pointer-events:auto; width:25vw; min-width:340px; max-height:calc((100vh - 24px) * 0.6667);
+      background:rgba(18,26,43,.92); border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.35);
+      color:var(--text); font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial; display:flex; flex-direction:column; }
+    @media (max-width:640px){ .card{ width:100%; } }
+    .card.minimized .panel{ display:none; }
+    .card-header{ display:flex; justify-content:space-between; align-items:center; padding:8px 12px; background:rgba(18,26,43,.95); border-bottom:1px solid var(--border); border-radius:12px 12px 0 0; }
+    .card-header span{ font-weight:600; font-size:14px; }
+    .card-header .actions{ display:flex; gap:6px; }
+    .card-header button{ background:#0f1626; border:1px solid var(--border); color:#8aa0c6; cursor:pointer; font-size:12px; padding:4px 8px; border-radius:8px; }
+    .panel{ padding:8px 12px; overflow:auto; }
+    details.section{ margin:8px 0; border:1px solid var(--border); border-radius:10px; background:#0f1626; }
+    details.section > summary{ list-style:none; cursor:pointer; user-select:none; padding:10px 12px; font-weight:600; color:#cfe6ff; border-radius:10px; outline:none; }
+    details.section[open] > summary{ background:rgba(56,189,248,.08); border-bottom:1px solid var(--border); border-radius:10px 10px 0 0; }
+    .section-body{ padding:10px 12px; }
+    .row{ display:flex; gap:8px; }
+    .row > *{ flex:1; }
+    label{ display:block; margin:6px 0 4px; color:var(--muted); }
+    input[type="text"], select, input[type="number"]{ width:100%; background:#0f1626; color:#e7eefc; border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+    input[type="range"], input[type="datetime-local"]{ width:100%; }
+    .btn{ cursor:pointer; user-select:none; border:1px solid var(--border); background:#0f1626; color:#e7eefc; padding:8px 10px; border-radius:10px; }
+    .btn:hover{ border-color:#365282; }
+    .pill{ padding:4px 8px; border-radius:999px; background:rgba(56,189,248,.1); border:1px solid rgba(56,189,248,.35); color:#bfe9ff; font-size:12px; }
+    .status{ font-size:12px; color:#a9b7d1; margin-top:6px; }
+    .muted{ color:#8aa0c6; font-size:12px; }
+    .legend{ display:flex; align-items:center; gap:8px; margin-top:6px; }
+    /* 图例：0–20 km/h 蓝→红连续渐变 */
+    .legend > div{
+      width:44px; height:10px;
+      background:linear-gradient(to right, #0000ff, #ff0000);
+      border-radius:8px; border:1px solid #2b3a57;
+    }
+    /* 实时模式下隐藏播放控件 */
+    body.is-live .playback-controls{ display:none; }
+    /* HUD 样式（正常字号） */
+    .hud{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0 2px; }
+  </style>
+</head>
+<body class="credits-fix" id="bodyRoot">
+  <div class="chrome">
+    <div class="card" id="cardAll">
+      <div class="card-header">
+        <span>控制台（影像 / 轨迹 / 视图 / 导出）</span>
+        <div class="actions">
+          <button id="collapseAll">折叠全部</button>
+          <button id="expandAll">展开全部</button>
+          <button onclick="toggleCard('cardAll')">—</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <!-- 1) 影像与范围 -->
+        <details class="section" id="secImagery" open>
+          <summary>影像与范围</summary>
+          <div class="section-body">
+            <label>切片 URL 模板（TMS/XYZ）</label>
+            <input id="tileUrl" type="text" value="map/{z}/{x}/{reverseY}.png" placeholder="map/{z}/{x}/{reverseY}.png 或 map/{z}/{x}/{y}.png">
+            <div class="row">
+              <div>
+                <label>坐标系</label>
+                <select id="proj"><option value="3857" selected>WebMercator (EPSG:3857)</option></select>
+              </div>
+              <div>
+                <label>Y 轴</label>
+                <select id="yMode"><option value="tms" selected>TMS（{reverseY}）</option><option value="xyz">XYZ（{y}）</option></select>
+              </div>
+            </div>
+            <div class="row">
+              <div><label>最小级别</label><input type="number" id="minLevel" value="0" min="0" max="24"></div>
+              <div><label>最大级别</label><input type="number" id="maxLevel" value="24" min="0" max="24"></div>
+            </div>
+            <div class="row">
+              <div><label>西经</label><input type="text" id="west"  value="120.6456660990271"></div>
+              <div><label>南纬</label><input type="text" id="south" value="31.461523309707065"></div>
+            </div>
+            <div class="row">
+              <div><label>东经</label><input type="text" id="east"  value="120.65017236915412"></div>
+              <div><label>北纬</label><input type="text" id="north" value="31.465391329032933"></div>
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <button class="btn" id="btnApply">应用/重载切片</button>
+              <button class="btn" id="btnFly">飞到影像范围</button>
+              <button class="btn" id="btnUseViewRect">用当前视图设为范围</button>
+            </div>
+            <div class="status" id="status">状态：就绪</div>
+          </div>
+        </details>
+
+        <!-- 2) 渲染与底图 -->
+        <details class="section" id="secRender" open>
+          <summary>渲染与底图</summary>
+          <div class="section-body">
+            <label>透明度 <span id="alphaVal" class="pill">0.75</span></label>
+            <input id="alpha" type="range" min="0" max="1" step="0.01" value="0.75">
+            <div class="row">
+              <div><label>亮度</label><input id="brightness" type="range" min="0" max="3" step="0.01" value="1"></div>
+              <div><label>对比度</label><input id="contrast" type="range" min="0" max="3" step="0.01" value="1.2"></div>
+            </div>
+            <div class="row">
+              <div><label>饱和度</label><input id="saturation" type="range" min="0" max="3" step="0.01" value="1.1"></div>
+              <div><label>色相</label><input id="hue" type="range" min="-1" max="1" step="0.01" value="0"></div>
+            </div>
+            <label>底图</label>
+            <select id="basemap">
+              <option value="esri" selected>ESRI World Imagery（高分）</option>
+              <option value="carto">Carto Light（Retina）</option>
+              <option value="eox">EOX Sentinel-2 cloudless</option>
+              <option value="osm">OSM 标准</option>
+              <option value="none">无底图</option>
+            </select>
+          </div>
+        </details>
+
+        <!-- 3) GPS 轨迹（统一数据管线：目录轮询） -->
+        <details class="section" id="secTrack" open>
+          <summary>GPS 轨迹</summary>
+          <div class="section-body">
+            <span class="pill">实时文件追踪（目录轮询）</span>
+            <div class="row">
+              <div><label>数据目录</label><input id="dirUrl" type="text" value="test_data/"></div>
+              <div><label>清单（可选）</label><input id="manifestUrl" type="text" value="test_data/manifest.json" placeholder="test_data/manifest.json"></div>
+            </div>
+            <div class="row">
+              <div><label>前缀（无清单时推断）</label><input id="filePrefix" type="text" value="2025_09_14_18_17_"></div>
+              <div><label>后缀</label><input id="fileSuffix" type="text" value=".txt"></div>
+            </div>
+            <div class="row">
+              <div><label>秒位数</label><input id="secDigits" type="number" value="2" min="1" max="3"></div>
+              <div><label>轮询间隔（秒）</label><input id="dirInterval" type="number" value="1.0" min="0.2" step="0.1"></div>
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <button class="btn" id="btnStartDir">开始目录追踪</button>
+              <button class="btn" id="btnStopDir">停止</button>
+              <button class="btn" id="btnClearGPS">清除</button>
+            </div>
+            <div class="status" id="dirStatus">状态：未开始</div>
+
+            <div class="legend"><div></div><span class="muted">速度着色：慢→快（0–20 km/h）</span></div>
+            <div class="hud">
+              <span class="pill">实时</span>
+              <span id="hudSpeed" class="pill">速度：-- km/h</span>
+              <span id="hudTime"  class="pill">时间：--</span>
+              <span id="hudPos"   class="pill">经纬：--</span>
+            </div>
+            <div class="status" id="gpsStatus">状态：未加载</div>
+            <div class="muted" style="margin-top:6px;">
+              解析 <code>$GPCHC</code>（纬=第13列，经=第14列，高=第15列）；兼容 <b>$GPGGA/$GNGGA、$GPRMC/$GNRMC</b>。行首方括号为时间戳。
+            </div>
+          </div>
+        </details>
+
+        <!-- 4) 视图 & 工具（播放 / 导出） -->
+        <details class="section" id="secTools" open>
+          <summary>视图 & 工具</summary>
+          <div class="section-body">
+            <div class="row" style="margin-bottom:8px;">
+              <button class="btn" id="btn2D">2D</button>
+              <button class="btn" id="btn3D">3D</button>
+              <button class="btn" id="btnReset">重置相机</button>
+            </div>
+            <div style="margin-top:-4px; margin-bottom:12px;">
+              <span class="pill">提示</span>
+              <span class="status">滚轮=缩放，中键拖=倾斜，右键拖=旋转</span>
+            </div>
+
+            <div class="row" style="margin-bottom:8px;">
+              <button class="btn" id="btnExportGeoJSON">导出 GeoJSON</button>
+              <button class="btn" id="btnExportCSV">导出 CSV</button>
+            </div>
+
+            <!-- 播放控件：在实时模式下隐藏（.playback-controls 被 CSS 隐藏） -->
+            <div class="playback-controls">
+              <label class="muted">播放速度 <span id="spdVal" class="pill">1.0x</span></label>
+              <input id="speed" type="range" min="0.1" max="5" step="0.1" value="1">
+
+              <div class="row">
+                <div>
+                  <label class="muted">跳过 ≥（秒）的空档</label>
+                  <input id="skipGap" type="number" value="5" min="0" step="1">
+                </div>
+                <div>
+                  <label class="muted">最大跨段距离（m）</label>
+                  <input id="maxJump" type="number" value="200" min="0" step="10">
+                </div>
+              </div>
+
+              <div class="row" style="align-items:center; margin-top:6px;">
+                <label><input type="checkbox" id="follow" checked> 自动跟随相机</label>
+                <button class="btn" id="btnPlay">开始播放（边走边画）</button>
+                <button class="btn" id="btnPause">暂停</button>
+              </div>
+            </div>
+            <div class="status" id="toolStatus">状态：就绪（实时 / 导出可用）</div>
+          </div>
+        </details>
+      </div>
+    </div>
+  </div>
+
+  <div id="cesiumContainer"></div>
+
+  <script src="https://unpkg.com/cesium@1.114.0/Build/Cesium/Cesium.js"></script>
+  <script>
+    // ============ 折叠/展开 ============
+    function toggleCard(id){ document.getElementById(id).classList.toggle('minimized'); }
+    document.getElementById('collapseAll').onclick = ()=> document.querySelectorAll('details.section').forEach(d=> d.open=false);
+    document.getElementById('expandAll').onclick  = ()=> document.querySelectorAll('details.section').forEach(d=> d.open=true);
+
+    // ============ Cesium Viewer ============
+    const viewer = new Cesium.Viewer('cesiumContainer', {
+      animation:false, baseLayerPicker:false, geocoder:false, homeButton:false,
+      infoBox:false, sceneModePicker:false, selectionIndicator:false, timeline:false,
+      navigationHelpButton:false, fullscreenButton:false,
+      skyBox:false, skyAtmosphere:false, terrain:undefined, imageryProvider:false,
+      requestRenderMode:true, maximumRenderTimeChange: Infinity
+    });
+    const ssc = viewer.scene.screenSpaceCameraController;
+    ssc.zoomEventTypes = [Cesium.CameraEventType.WHEEL, Cesium.CameraEventType.PINCH];
+    ssc.tiltEventTypes = [Cesium.CameraEventType.MIDDLE_DRAG, Cesium.CameraEventType.PINCH, Cesium.CameraEventType.RIGHT_DRAG];
+    viewer.resolutionScale = Math.min(2.0, window.devicePixelRatio || 1);
+    viewer.shadows = false; viewer.scene.globe.enableLighting = false;
+
+    document.getElementById('btn2D').onclick    = ()=> viewer.scene.morphTo2D(0.8);
+    document.getElementById('btn3D').onclick    = ()=> viewer.scene.morphTo3D(0.8);
+    document.getElementById('btnReset').onclick = ()=> viewer.camera.setView({ destination: getRectSafely() });
+
+    // ============ 底图 ============
+    let baseLayer;
+    function setBasemap(kind){
+      if (baseLayer) viewer.imageryLayers.remove(baseLayer, true);
+      const wm = new Cesium.WebMercatorTilingScheme();
+      const add = (provider)=>{ baseLayer = viewer.imageryLayers.addImageryProvider(provider); };
+      if (kind === 'esri') add(new Cesium.UrlTemplateImageryProvider({
+        url: 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        tilingScheme: wm, maximumLevel: 20,
+        credit: 'Source: Esri — Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+      }));
+      else if (kind === 'carto'){
+        const isRetina = (window.devicePixelRatio || 1) > 1.1;
+        const url = `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}${isRetina?'@2x':''}.png`;
+        add(new Cesium.UrlTemplateImageryProvider({ url, tilingScheme: wm, subdomains: ['a','b','c','d'], tileWidth: isRetina?512:256, tileHeight: isRetina?512:256, maximumLevel: 20, credit:'© CARTO, © OpenStreetMap contributors' }));
+      }
+      else if (kind === 'eox') add(new Cesium.UrlTemplateImageryProvider({ url:'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2021_3857/default/GoogleMapsCompatible/{z}/{y}/{x}.jpg', tilingScheme: wm, maximumLevel: 14, credit:'Sentinel-2 cloudless © EOX IT Services GmbH; © ESA' }));
+      else if (kind === 'osm') add(new Cesium.UrlTemplateImageryProvider({ url:'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png', tilingScheme: wm, maximumLevel: 19, credit:'© OpenStreetMap contributors' }));
+      else baseLayer = null;
+      viewer.scene.requestRender();
+    }
+
+    // ============ 影像（DOM 切片） ============
+    let domLayer;
+    function getRectSafely(){
+      let w = parseFloat(document.getElementById('west').value);
+      let s = parseFloat(document.getElementById('south').value);
+      let e = parseFloat(document.getElementById('east').value);
+      let n = parseFloat(document.getElementById('north').value);
+      if (isFinite(w) && isFinite(e) && w > e) [w, e] = [e, w];
+      if (isFinite(s) && isFinite(n) && s > n) [s, n] = [n, s];
+      return Cesium.Rectangle.fromDegrees(w, s, e, n);
+    }
+    function applyDomLayer(){
+      const status = document.getElementById('status');
+      const yMode = document.getElementById('yMode').value;
+      const tplInput = document.getElementById('tileUrl').value.trim();
+      if (!tplInput) { status.textContent = '状态：请填写切片 URL 模板'; return; }
+      const tpl = yMode === 'tms' ? tplInput.replace('{y}','{reverseY}') : tplInput.replace('{reverseY}','{y}');
+      const minLevel = parseInt(document.getElementById('minLevel').value,10);
+      const maxLevel = parseInt(document.getElementById('maxLevel').value,10);
+      if (domLayer) { viewer.imageryLayers.remove(domLayer, true); domLayer = null; }
+      const provider = new Cesium.UrlTemplateImageryProvider({
+        url: tpl, tilingScheme: new Cesium.WebMercatorTilingScheme(), rectangle: getRectSafely(),
+        minimumLevel: Math.max(0, Math.min(minLevel, maxLevel)),
+        maximumLevel: Math.max(0, Math.max(minLevel, maxLevel)),
+        tileWidth:256, tileHeight:256, credit:'Tiles © Local map/ — Data: DOM'
+      });
+      provider.errorEvent.addEventListener((err)=>{ status.textContent = '状态：切片请求异常 - '+ err.message; });
+      domLayer = viewer.imageryLayers.addImageryProvider(provider);
+      domLayer.alpha = parseFloat(document.getElementById('alpha').value);
+      bindToneMapping(domLayer); viewer.imageryLayers.raiseToTop(domLayer);
+      status.textContent = '状态：切片已加载（目录：map/）'; viewer.scene.requestRender();
+    }
+    function bindToneMapping(layer){
+      const ids = ['brightness','contrast','saturation','hue'];
+      function update(){
+        layer.brightness = parseFloat(document.getElementById('brightness').value);
+        layer.contrast   = parseFloat(document.getElementById('contrast').value);
+        layer.saturation = parseFloat(document.getElementById('saturation').value);
+        layer.hue        = parseFloat(document.getElementById('hue').value);
+        viewer.scene.requestRender();
+      }
+      ids.forEach(id=> document.getElementById(id).oninput = update); update();
+    }
+    document.getElementById('alpha').addEventListener('input', (e)=>{ const v = parseFloat(e.target.value); document.getElementById('alphaVal').textContent = v.toFixed(2); if (domLayer) domLayer.alpha = v; viewer.scene.requestRender(); });
+    document.getElementById('btnApply').onclick = applyDomLayer;
+    document.getElementById('btnFly').onclick   = ()=> viewer.camera.flyTo({ destination: getRectSafely(), duration: 1.2 });
+    document.getElementById('btnUseViewRect').onclick = ()=>{
+      const r = viewer.camera.computeViewRectangle(viewer.scene.globe.ellipsoid); if (!r) return;
+      const toDeg = Cesium.Math.toDegrees;
+      document.getElementById('west').value  = toDeg(r.west).toFixed(9);
+      document.getElementById('south').value = toDeg(r.south).toFixed(9);
+      document.getElementById('east').value  = toDeg(r.east).toFixed(9);
+      document.getElementById('north').value = toDeg(r.north).toFixed(9);
+      viewer.scene.requestRender();
+    };
+    document.getElementById('basemap').onchange = (e)=> setBasemap(e.target.value);
+    setBasemap('esri'); applyDomLayer(); viewer.camera.setView({ destination: getRectSafely() });
+
+    const hdl = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+    ['MOUSE_MOVE','WHEEL'].forEach(t=>{ hdl.setInputAction(()=> viewer.scene.requestRender(), Cesium.ScreenSpaceEventType[t]); });
+
+    // ============ 轨迹：统一数据管线 ============
+    const state = {
+      allPoints: [],
+      playIdx:   0,
+      marker:null,
+      isPlaying:false,
+      timer:null,
+      liveSegments: [],
+      LIVE_SEGMENT_MAX: 1500,
+      dir:  { timer:null, processed:new Set(), lastSecond:null },
+      mode: 'idle' // 'idle' | 'snapshot' | 'live'
+    };
+
+    // ---------- 通用工具 ----------
+    function parseBracketTimestamp(line){
+      const m = line.match(/\[(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\]/);
+      if(!m) return null; return new Date(m[1].replaceAll('-','/')+' '+m[2]);
+    }
+    function nmeaLatLonToDeg(val,hemi){
+      if(!val) return null; const f = parseFloat(val); if(isNaN(f)) return null;
+      const deg = Math.floor(f/100); const min = f - deg*100; let out = deg + (min/60);
+      if(hemi==='S'||hemi==='W') out = -out; return out;
+    }
+    function tryParseRMC(line){
+      if(!/(\$GPRMC|\$GNRMC)/.test(line)) return null;
+      const p = line.split(','); if(p.length<12) return null; if(p[2]!=='A') return null;
+      const lat = nmeaLatLonToDeg(p[3],p[4]); const lon = nmeaLatLonToDeg(p[5],p[6]); if(lat==null||lon==null) return null;
+      return {lat,lon,alt:0};
+    }
+    function tryParseGGA(line){
+      if(!/(\$GPGGA|\$GNGGA)/.test(line)) return null;
+      const p = line.split(','); if(p.length<10) return null; if(p[6]==='0'||p[6]==='') return null;
+      const lat = nmeaLatLonToDeg(p[2],p[3]); const lon = nmeaLatLonToDeg(p[4],p[5]); const alt = parseFloat(p[9])||0;
+      if(lat==null||lon==null) return null; return {lat,lon,alt};
+    }
+    function tryParseGPCHC(line){
+      if(!/\$GPCHC/.test(line)) return null;
+      const p = line.split(','); if(p.length < 15) return null;
+      const lat = parseFloat(p[12]); const lon = parseFloat(p[13]); const alt = parseFloat(p[14])||0;
+      if(isNaN(lat)||isNaN(lon)) return null; return {lat,lon,alt};
+    }
+    function haversine(lon1,lat1,lon2,lat2){
+      const R=6371000; const toRad=x=>x*Math.PI/180;
+      const dLat=toRad(lat2-lat1), dLon=toRad(lon2-lon1);
+      const a=Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(a));
+    }
+
+    // 速度着色：0–20 km/h 蓝→红连续渐变（超过20按20处理，仅影响颜色）
+    function speedColor(v_mps){
+      const kmh = Math.max(0, Math.min(20, (v_mps || 0) * 3.6));
+      const t = kmh / 20; // 0->蓝  1->红
+      const r = Math.round(255 * t);
+      const g = 0;
+      const b = Math.round(255 * (1 - t));
+      return Cesium.Color.fromBytes(r, g, b);
+    }
+
+    // ---------- 模式切换 & HUD ----------
+    function setMode(m){
+      state.mode = m;
+      const body = document.getElementById('bodyRoot');
+      if (m === 'live') { body.classList.add('is-live'); document.getElementById('toolStatus').textContent='状态：实时模式（显示实时速度）'; }
+      else if (m === 'snapshot') { body.classList.remove('is-live'); document.getElementById('toolStatus').textContent='状态：离线快照，可播放'; }
+      else { body.classList.remove('is-live'); document.getElementById('toolStatus').textContent='状态：就绪（实时 / 导出可用）'; }
+    }
+    function updateHUD(p){
+      if(!p) return;
+      const kmh = (p.speed || 0) * 3.6;
+      document.getElementById('hudSpeed').textContent = `速度：${kmh.toFixed(1)} km/h`;
+      document.getElementById('hudTime').textContent  = `时间：${new Date(p.time).toLocaleString()}`;
+      document.getElementById('hudPos').textContent   = `经纬：${p.lon.toFixed(6)}, ${p.lat.toFixed(6)}`;
+    }
+
+    // ---------- 渲染 Helpers ----------
+    function ensureMarker(){
+      if(state.marker) return state.marker;
+      state.marker = viewer.entities.add({
+        point:{ pixelSize:10, color: Cesium.Color.ORANGE, outlineColor: Cesium.Color.BLACK, outlineWidth:2 },
+        label:{ text:'—', font:'26px sans-serif', pixelOffset:new Cesium.Cartesian2(0,-30),
+                fillColor: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth:2 }
+      });
+      return state.marker;
+    }
+    function drawSegmentIfValid(prev, p){
+      const dtSec = (p.time - prev.time)/1000;
+      const distM = haversine(prev.lon,prev.lat,p.lon,p.lat);
+      const skipGapSec = Math.max(0, parseFloat(document.getElementById('skipGap').value || '0'));
+      const maxJumpM   = Math.max(0, parseFloat(document.getElementById('maxJump').value || '0'));
+      const tooLong = (skipGapSec>0 && dtSec >= skipGapSec);
+      const tooFar  = (maxJumpM>0 && distM > maxJumpM);
+      if (tooLong || tooFar) return null;
+      const speed = (dtSec>0)? (distM/dtSec) : 0;
+      const color = speedColor(speed);
+      return viewer.entities.add({
+        polyline:{
+          positions:[
+            Cesium.Cartesian3.fromDegrees(prev.lon,prev.lat,prev.alt||0),
+            Cesium.Cartesian3.fromDegrees(p.lon,p.lat,p.alt||0)
+          ],
+          width:3, arcType: Cesium.ArcType.GEODESIC, material: color
+        }
+      });
+    }
+    function pushSegment(seg){
+      state.liveSegments.push(seg);
+      if (state.liveSegments.length > state.LIVE_SEGMENT_MAX){
+        const rm = state.liveSegments.shift();
+        viewer.entities.remove(rm);
+      }
+    }
+    function focusCameraTo(p){
+      if (!p) return;
+      const ent = ensureMarker();
+      ent.position = Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt || 0);
+      const kmh = ((p.speed||0)*3.6).toFixed(1);
+      ent.label.text = state.mode==='live' ? `${kmh} km/h` : '播放';
+      if (document.getElementById('follow').checked){
+        const h = Math.min(Math.max(viewer.camera.positionCartographic.height || 500, 200), 5000);
+        viewer.camera.setView({ destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, h) });
+      }
+      viewer.scene.requestRender();
+    }
+
+    // ---------- 统一解析 & 追加 ----------
+    function parseLineToPoint(line){
+      if(!line) return null;
+      const tt = parseBracketTimestamp(line); if(!tt) return null;
+      const pos = tryParseGPCHC(line) || tryParseGGA(line) || tryParseRMC(line);
+      if(!pos) return null;
+      return { time: tt, lon: pos.lon, lat: pos.lat, alt: pos.alt||0 };
+    }
+    function appendPointsFromText(text){
+      const lines = text.split(/\r?\n/);
+      let newCount = 0; let lastAdded = null;
+      for (const line of lines){
+        const p = parseLineToPoint(line); if(!p) continue;
+        const last = state.allPoints.length ? state.allPoints[state.allPoints.length-1] : null;
+        if (last){
+          const dt=(p.time-last.time)/1000; const dist=haversine(last.lon,last.lat,p.lon,p.lat);
+          p.speed = dt>0? (dist/dt) : 0;
+          const seg = drawSegmentIfValid(last, p); if (seg) pushSegment(seg);
+        } else {
+          p.speed = 0;
+          viewer.camera.flyTo({ destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, 800), duration: 0.6 });
+        }
+        state.allPoints.push(p); lastAdded = p; newCount++;
+      }
+      if (newCount>0){
+        focusCameraTo(lastAdded);
+        updateHUD(lastAdded);
+        document.getElementById('gpsStatus').textContent = `状态：已追加 ${newCount} 行（累计 ${state.allPoints.length} 点）`;
+      }
+      return newCount;
+    }
+
+    // ---------- 播放控制（对已累积点回放；实时模式下隐藏控件） ----------
+    function tickPlayback(){
+      if(!state.isPlaying || state.allPoints.length === 0) return;
+      const p = state.allPoints[state.playIdx];
+      focusCameraTo(p);
+      if (state.playIdx > 0){
+        const seg = drawSegmentIfValid(state.allPoints[state.playIdx-1], p);
+        if (seg) pushSegment(seg);
+      }
+      const speedMul = Math.max(0.1, parseFloat(document.getElementById('speed').value || '1'));
+      document.getElementById('spdVal').textContent = `${speedMul.toFixed(1)}x`;
+      let delayMs = 800;
+      if (state.playIdx < state.allPoints.length - 1){
+        const t0 = state.allPoints[state.playIdx].time, t1 = state.allPoints[state.playIdx+1].time;
+        const dtSec = (t1 - t0)/1000;
+        const skipGapSec = Math.max(0, parseFloat(document.getElementById('skipGap').value || '0'));
+        delayMs = (skipGapSec>0 && dtSec >= skipGapSec) ? 120 : Math.max(50, Math.min(3000, (dtSec*1000)/speedMul));
+      }
+      state.playIdx = (state.playIdx + 1) % state.allPoints.length;
+      state.timer = setTimeout(tickPlayback, delayMs);
+    }
+    function startPlay(){
+      if(state.allPoints.length === 0){ document.getElementById('toolStatus').textContent = '状态：无可播放轨迹'; return; }
+      if(state.isPlaying) return;
+      resetSegmentsOnly();
+      focusCameraTo(state.allPoints[0]);
+      state.isPlaying = true;
+      document.getElementById('toolStatus').textContent = '状态：回放中（按真实间隔）';
+      tickPlayback();
+    }
+    function pausePlay(){ state.isPlaying = false; if (state.timer){ clearTimeout(state.timer); state.timer = null; } document.getElementById('toolStatus').textContent = '状态：已暂停'; }
+    document.getElementById('btnPlay').onclick = startPlay;
+    document.getElementById('btnPause').onclick = pausePlay;
+
+    // ---------- 导出 ----------
+    function exportGeoJSON(){
+      const fc = { type:'FeatureCollection', features: [] };
+      if (!state.allPoints.length) return;
+      const coords = state.allPoints.map(p=>[p.lon, p.lat, p.alt||0]);
+      const times  = state.allPoints.map(p=> new Date(p.time).toISOString());
+      fc.features.push({ type:'Feature', properties:{ times }, geometry:{ type:'LineString', coordinates: coords } });
+      const blob = new Blob([JSON.stringify(fc,null,2)], {type:'application/geo+json'});
+      const url = URL.createObjectURL(blob); download(url, 'track.geojson');
+    }
+    function exportCSV(){
+      let rows = ['time,lon,lat,alt,speed_m_s'];
+      for(const p of state.allPoints){ rows.push(`${new Date(p.time).toISOString()},${p.lon},${p.lat},${p.alt||0},${p.speed??''}`); }
+      const blob = new Blob([rows.join('\n')], {type:'text/csv'}); const url = URL.createObjectURL(blob); download(url, 'track.csv');
+    }
+    function download(url, name){ const a=document.createElement('a'); a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url); }
+    document.getElementById('btnExportGeoJSON').onclick = exportGeoJSON;
+    document.getElementById('btnExportCSV').onclick    = exportCSV;
+
+    // ---------- 清理 ----------
+    function resetSegmentsOnly(){
+      for (const e of state.liveSegments){ viewer.entities.remove(e); }
+      state.liveSegments = [];
+      if (state.marker){ viewer.entities.remove(state.marker); state.marker=null; }
+    }
+    function clearDynamic(){
+      resetSegmentsOnly();
+      state.isPlaying=false; if (state.timer){ clearTimeout(state.timer); state.timer=null; }
+      state.allPoints=[]; state.playIdx=0;
+      stopDirWatch();
+      setMode('idle');
+      document.getElementById('gpsStatus').textContent='状态：未加载';
+      viewer.scene.requestRender();
+    }
+    document.getElementById('btnClearGPS').onclick = ()=>{ clearDynamic(); applyDomLayer(); setBasemap(document.getElementById('basemap').value||'esri'); };
+
+    // ============ 目录轮询（test_data 实时追踪） ============
+    document.getElementById('btnStartDir').onclick = startDirWatch;
+    document.getElementById('btnStopDir').onclick  = stopDirWatch;
+
+    function startDirWatch(){
+      const dir = document.getElementById('dirUrl').value.trim() || 'test_data/';
+      if (!dir.endsWith('/')) document.getElementById('dirUrl').value = dir + '/';
+      if (state.dir.timer) return;
+      state.dir.processed.clear(); state.dir.lastSecond = null;
+      setMode('live');
+      document.getElementById('dirStatus').textContent = '状态：目录轮询中...';
+      scheduleDirTick(true);
+    }
+    function stopDirWatch(){ if (state.dir.timer){ clearTimeout(state.dir.timer); state.dir.timer = null; } document.getElementById('dirStatus').textContent = '状态：未开始'; }
+    function scheduleDirTick(immediate=false){ const sec = Math.max(0.2, parseFloat(document.getElementById('dirInterval').value || '1.0')); if (immediate){ dirTick(); return; } state.dir.timer = setTimeout(dirTick, sec*1000); }
+
+    async function dirTick(){
+      try{
+        const files = await listTestDataFiles();
+        if (files && files.length){
+          files.sort();
+          const newOnes = files.filter(fn => !state.dir.processed.has(fn));
+          if (newOnes.length){
+            let addedPoints = 0;
+            for (const fn of newOnes){
+              const n = await fetchAndAppendFile(fn);
+              if (n){ state.dir.processed.add(fn); addedPoints += n; }
+            }
+            if (addedPoints>0){ document.getElementById('dirStatus').textContent = `状态：已加载 ${newOnes.length} 个新文件，追加 ${addedPoints} 点`; }
+          }
+        }
+      } catch(err){ document.getElementById('dirStatus').textContent = '状态：目录轮询异常 - ' + (err?.message || err); }
+      finally{ scheduleDirTick(); }
+    }
+
+    async function listTestDataFiles(){
+      const manifestUrl = document.getElementById('manifestUrl').value.trim();
+      const dirUrl = document.getElementById('dirUrl').value.trim() || 'test_data/';
+      if (manifestUrl){
+        try{ const res = await fetch(manifestUrl, {cache:'no-cache'}); if (res.ok){ const arr = await res.json(); return (arr||[]).map(n => n.startsWith('http') ? n : dirUrl.replace(/\/?$/,'/') + n); } }catch(e){}
+      }
+      try{
+        const url = dirUrl.endsWith('/')? dirUrl : (dirUrl + '/');
+        const res = await fetch(url, {cache:'no-cache'});
+        if (res.ok){
+          const html = await res.text();
+          const links = [...html.matchAll(/href\s*=\s*["']([^"']+\.txt)["']/ig)].map(m=>m[1]);
+          if (links.length){ const fulls = links.map(href => href.startsWith('http') ? href : url + href.replace(/^\.?\//,'')); return fulls; }
+        }
+      }catch(e){}
+      const pref = document.getElementById('filePrefix').value.trim();
+      const suff = document.getElementById('fileSuffix').value.trim() || '.txt';
+      const secDigits = Math.max(1, Math.min(3, parseInt(document.getElementById('secDigits').value||'2',10)));
+      if (!pref){ document.getElementById('dirStatus').textContent = '状态：无法列目录（建议提供 manifest.json 或开启目录索引、或设置前缀）'; return []; }
+      const now = new Date();
+      let startSec = (state.dir.lastSecond != null ? state.dir.lastSecond : now.getSeconds());
+      const tryList = [];
+      for (let k=0;k<20;k++){
+        const s = (startSec + k) % 60;
+        const sStr = s.toString().padStart(secDigits,'0');
+        tryList.push(`${pref}${sStr}${suff}`);
+      }
+      return tryList.map(n => dirUrl.replace(/\/?$/,'/') + n);
+    }
+
+    async function fetchAndAppendFile(urlOrPath){
+      try{
+        const res = await fetch(urlOrPath, {cache:'no-cache'}); if (!res.ok) return 0;
+        const text = await res.text();
+        const added = appendPointsFromText(text);
+        if (added>0){ const m = urlOrPath.match(/(\d{1,3})\.txt$/); if (m){ state.dir.lastSecond = parseInt(m[1],10); } }
+        return added;
+      } catch(e){ return 0; }
+    }
+
+    // 初始底图
+    setBasemap('esri');
+  </script>
+</body>
+</html>
