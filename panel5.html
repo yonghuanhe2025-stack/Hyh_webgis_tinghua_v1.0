@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FINAL｜只同步姿态的 STL 播放器（本地目录自动监测｜r146 离线｜SolidWorks交互｜稳定优化）</title>
+  <!-- 说明：
+    - 默认 HTTP 模式：直接从 ./test_data/ 读取，不弹窗、不需授权
+    - 可选本地目录模式：点击“选择 test_data 目录（可选）”手动授权
+    - three.js r146 UMD 非模块脚本需与本文件同级：
+        three.min.js / OrbitControls.js / STLLoader.js
+    - 启动建议：python -m http.server 8000 访问 http://localhost:8000/
+    - 交互：中键=旋转 · Ctrl+中键=平移 · Shift+中键=变焦 · 滚轮=缩放 · 双击=复位
+    - 稳定/性能：①单次执行锁 ②日志限长 ③只读尾部(64KB) ④目录重扫节流
+                 ⑤读取失败退避 ⑥末行未完成保护（优先 $GPCHC）
+  -->
+  <style>
+    :root{ --bg:#0b1221; --panel:#111827; --muted:#9fb1d1; --text:#e7eefc; --accent:#38bdf8; --border:#233043 }
+    html,body{height:100%; margin:0; background:var(--bg); color:var(--text); font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+    #app{position:fixed; inset:0}
+    #viewer{position:absolute; inset:0; display:block; width:100%; height:100%}
+    .chrome{position:fixed; inset:12px; pointer-events:none; z-index:10}
+    .panel{pointer-events:auto; background:linear-gradient(180deg, rgba(17,24,39,.92), rgba(17,24,39,.8)); border:1px solid var(--border); border-radius:16px; padding:12px 14px; box-shadow:0 10px 30px rgba(0,0,0,.35); backdrop-filter: blur(6px); width:min(980px,96vw)}
+    .row{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+    .title{font-weight:700; letter-spacing:.3px}
+    .muted{color:var(--muted); font-size:12px}
+    .btn, select, input[type="number"], input[type="file"], input[type="checkbox"]{appearance:none; border:1px solid var(--border); background:#0f172a; color:var(--text); border-radius:12px; padding:8px 12px; cursor:pointer; transition:.2s transform,.2s opacity; font:inherit}
+    .btn:hover{transform:translateY(-1px)}
+    .legend{position:fixed; right:12px; bottom:12px; background:rgba(17,24,39,.85); border:1px solid var(--border); border-radius:12px; padding:8px 10px; font-size:12px}
+    .logbox{background:#0b1221; border:1px solid var(--border); border-radius:10px; padding:8px; overflow:auto; height:160px; font:12px/1.4 ui-monospace,Consolas,Menlo}
+    .logline{white-space:pre-wrap}
+    .logline.info{color:#9fb1d1}
+    .logline.warn{color:#ffd166}
+    .logline.error{color:#ff6b6b}
+    .hidden{display:none!important}
+    .kbd{padding:0 6px; border:1px solid var(--border); border-radius:6px; font:12px/20px ui-monospace,Consolas,Menlo; background:#0b1221; color:var(--muted)}
+  </style>
+</head>
+<body>
+<div id="app">
+  <canvas id="viewer"></canvas>
+
+  <div class="chrome" id="chrome">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between; align-items:baseline">
+        <div>
+          <div class="title">只同步姿态的 STL 播放器（本地目录自动监测｜SolidWorks交互）</div>
+          <div class="muted">r146 离线 · $GPCHC/四元数/欧拉/加速度 解析 · Y-up · 仅旋转不位移</div>
+        </div>
+        <div class="row">
+          <button id="focusMode" class="btn" title="隐藏控制面板与状态">专注模式</button>
+          <button id="fullscreen" class="btn" title="切换浏览器全屏 (F)">全屏</button>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:8px; gap:8px">
+        <button id="pickDir" class="btn" title="可选：授权任意本地目录">选择 test_data 目录（可选）</button>
+        <span class="muted" id="dirStatus">HTTP 模式：./test_data/</span>
+      </div>
+
+      <div class="row" style="margin-top:8px; gap:8px">
+        <input id="stlFile" type="file" accept=".stl" class="btn" />
+        <button id="inlineSTL" class="btn">内置立方体</button>
+        <button id="fit" class="btn">视角复位</button>
+        <label class="muted">播放速率× <input id="rate" type="number" value="1" step="0.25" style="width:80px"></label>
+        <label class="muted">刷新间隔(ms) <input id="interval" type="number" value="100" step="1" style="width:90px"></label>
+        <label class="muted">自动监测<input id="autoWatch" type="checkbox" checked></label>
+        <label class="muted">监测周期(ms) <input id="watchInterval" type="number" value="500" step="100" style="width:90px"></label>
+        <button id="start" class="btn">开始播放</button>
+        <button id="stop" class="btn">停止</button>
+      </div>
+
+      <div class="row" style="margin-top:8px; gap:8px">
+        <label class="muted">姿态欧拉顺序
+          <select id="eulerOrder" class="btn">
+            <option value="ZXY">ZXY（默认）</option>
+            <option value="ZYX">ZYX</option>
+            <option value="YXZ">YXZ</option>
+            <option value="XYZ">XYZ</option>
+          </select>
+        </label>
+        <label class="muted">角度制<input id="deg" type="checkbox" checked></label>
+        <label class="muted">反号(Yaw)<input id="invYaw" type="checkbox"></label>
+        <label class="muted">反号(Pitch)<input id="invPitch" type="checkbox"></label>
+        <label class="muted">反号(Roll)<input id="invRoll" type="checkbox"></label>
+        <label class="muted">网格<input id="gridToggle" type="checkbox" checked></label>
+        <label class="muted">坐标轴<input id="axesToggle" type="checkbox" checked></label>
+        <label class="muted">融合：加速度→倾斜<input id="accelFusion" type="checkbox" checked></label>
+      </div>
+
+      <div class="row" style="margin-top:4px; gap:12px">
+        <div class="muted">交互：<span class="kbd">中键</span>旋转 · <span class="kbd">Ctrl+中键</span>平移 · <span class="kbd">Shift+中键</span>变焦 · <span class="kbd">滚轮</span>缩放 · <span class="kbd">双击</span>复位</div>
+        <div class="row">
+          <button id="presetSW" class="btn" title="SolidWorks风格交互">SW 预设</button>
+          <button id="presetDefault" class="btn" title="three.js 默认交互">默认预设</button>
+        </div>
+      </div>
+
+      <div class="logbox" id="log"></div>
+    </div>
+  </div>
+
+  <div class="legend" id="legend">状态：<span id="status">待机</span></div>
+</div>
+
+<script src="./three.min.js"></script>
+<script src="./OrbitControls.js"></script>
+<script src="./STLLoader.js"></script>
+<script>
+(function(){
+  // ===== 日志/状态 =====
+  const LOG_MAX = 500;
+  const logBox = document.getElementById('log');
+  const log = (lvl, ...args)=>{
+    const t=new Date().toLocaleTimeString();
+    const d=document.createElement('div'); d.className='logline '+lvl; d.textContent=`[${t}] [${lvl}] `+args.join(' ');
+    logBox.appendChild(d);
+    while(logBox.children.length>LOG_MAX){ for(let i=0;i<Math.ceil(LOG_MAX*0.1); i++) logBox.removeChild(logBox.firstChild); }
+    logBox.scrollTop=logBox.scrollHeight;
+  };
+  const setStatus = s=> document.getElementById('status').textContent = s;
+
+  if(!window.THREE){ alert('three.min.js 未加载'); return; }
+  log('info','THREE r'+THREE.REVISION+' 已加载');
+
+  // ===== 三维场景 =====
+  const canvas=document.getElementById('viewer');
+  const renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.setSize(innerWidth,innerHeight,false);
+  const scene=new THREE.Scene(); scene.background=new THREE.Color('#0b1221');
+  const camera=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,0.001,1e7); camera.position.set(6,4,7);
+  const controls=new THREE.OrbitControls(camera,renderer.domElement);
+  controls.enableDamping=true; controls.dampingFactor=0.08; controls.screenSpacePanning=true;
+  controls.zoomSpeed=1.0; controls.rotateSpeed=0.9; controls.panSpeed=0.8;
+  controls.minDistance=0.001; controls.maxDistance=1e6;
+  scene.add(new THREE.AmbientLight(0xffffff,0.6));
+  const dir=new THREE.DirectionalLight(0xffffff,0.8); dir.position.set(8,12,10); scene.add(dir);
+  const grid=new THREE.GridHelper(10,20,0x335577,0x223344); grid.material.opacity=0.25; grid.material.transparent=true; scene.add(grid);
+  const axes=new THREE.AxesHelper(1.5); scene.add(axes);
+  let rafLock=false; function render(){ if(rafLock) return; rafLock=true; requestAnimationFrame(()=>{ rafLock=false; renderer.render(scene,camera); }); }
+  controls.addEventListener('change', render);
+
+  // 视角复位
+  function fit(obj){
+    if(!obj) return;
+    const box=new THREE.Box3().setFromObject(obj);
+    const size=box.getSize(new THREE.Vector3());
+    const center=box.getCenter(new THREE.Vector3());
+    const maxDim=Math.max(size.x,size.y,size.z)||1;
+    const dist=maxDim/(2*Math.tan(Math.PI*camera.fov/360));
+    const dirv=new THREE.Vector3(1,0.6,1).normalize();
+    camera.position.copy(center.clone().add(dirv.multiplyScalar(dist*2)));
+    camera.near=Math.max(0.001,maxDim/2000); camera.far=Math.max(1000,dist*60); camera.updateProjectionMatrix();
+    controls.target.copy(center); controls.update(); render();
+  }
+  canvas.addEventListener('dblclick', ()=>{ if(model) fit(model); });
+
+  // SW手感
+  const DEFAULT_MAPPING={LEFT:THREE.MOUSE.ROTATE,MIDDLE:THREE.MOUSE.DOLLY,RIGHT:THREE.MOUSE.PAN};
+  const SW_MAPPING={LEFT:THREE.MOUSE.NONE,MIDDLE:THREE.MOUSE.ROTATE,RIGHT:THREE.MOUSE.PAN};
+  function applyMouseMapping(preset){
+    const map=preset==='sw'?SW_MAPPING:DEFAULT_MAPPING;
+    controls.mouseButtons.LEFT=map.LEFT; controls.mouseButtons.MIDDLE=map.MIDDLE; controls.mouseButtons.RIGHT=map.RIGHT;
+    log('info','交互预设：',preset==='sw'?'SolidWorks':'three.js 默认');
+  }
+  applyMouseMapping('sw');
+  let modifierMode=null;
+  addEventListener('keydown', e=>{
+    if(e.repeat) return;
+    if(e.key==='Control'){ modifierMode='PAN'; controls.mouseButtons.MIDDLE=THREE.MOUSE.PAN; }
+    else if(e.key==='Shift'){ modifierMode='DOLLY'; controls.mouseButtons.MIDDLE=THREE.MOUSE.DOLLY; }
+  });
+  addEventListener('keyup', e=>{
+    if((e.key==='Control' && modifierMode==='PAN') || (e.key==='Shift' && modifierMode==='DOLLY')){
+      controls.mouseButtons.MIDDLE=THREE.MOUSE.ROTATE; modifierMode=null; render();
+    }
+  });
+
+  // 模型加载
+  const loader=new THREE.STLLoader(); let model=null;
+  function setModelGeometry(geo){
+    try{
+      geo.computeBoundingBox(); const bb=geo.boundingBox; if(!bb) throw new Error('无包围盒');
+      const size=new THREE.Vector3(); bb.getSize(size); const center=new THREE.Vector3(); bb.getCenter(center);
+      const maxDim=Math.max(size.x,size.y,size.z)||1;
+      geo.applyMatrix4(new THREE.Matrix4().makeTranslation(-center.x,-center.y,-center.z));
+      if(maxDim>1e6 || maxDim<1e-6){ const s=1/maxDim; geo.applyMatrix4(new THREE.Matrix4().makeScale(s,s,s)); log('warn','归一化尺度 s=',s); }
+      geo.computeVertexNormals();
+    }catch(e){ log('warn','规范化失败',e.message); }
+    const mesh=new THREE.Mesh(geo,new THREE.MeshNormalMaterial());
+    if(model){ scene.remove(model); model.geometry.dispose(); model.material.dispose(); }
+    model=mesh; model.position.set(0,0,0); scene.add(model); fit(model); log('info','模型就绪');
+  }
+  document.getElementById('stlFile').addEventListener('change', e=>{
+    const f=e.target.files && e.target.files[0]; if(!f) return;
+    const r=new FileReader(); r.onload=()=>{ try{ setModelGeometry(loader.parse(r.result)); }catch(err){ alert('STL 解析失败: '+err); } };
+    r.readAsArrayBuffer(f); e.target.value='';
+  });
+  document.getElementById('inlineSTL').addEventListener('click', ()=>{ const g=new THREE.BoxGeometry(1,0.3,0.6); setModelGeometry(g); });
+  document.getElementById('fit').addEventListener('click', ()=>{ if(model) fit(model); });
+
+  // ===== 姿态工具 =====
+  const toRad=d=>d*Math.PI/180;
+  function quantizeQuat(q, dp=1){
+    const f=Math.pow(10,dp);
+    let x=Math.round(q.x*f)/f, y=Math.round(q.y*f)/f, z=Math.round(q.z*f)/f, w=Math.round(q.w*f)/f;
+    const n=Math.hypot(x,y,z,w)||1; return {x:x/n, y:y/n, z:z/n, w:w/n};
+  }
+  function quatFromTwoVectors(a,b){ // a->b
+    const v=new THREE.Vector3().crossVectors(a,b);
+    const w=Math.sqrt(a.dot(a)*b.dot(b))+a.dot(b);
+    const q=new THREE.Quaternion(v.x,v.y,v.z,w); return q.normalize();
+  }
+
+  // 低通的重力估计（加速度→倾斜）
+  let gLP = new THREE.Vector3(0,1,0); // 世界上方向
+  function updateTiltFromAccel(ax,ay,az){
+    const a=new THREE.Vector3(ax,ay,az);
+    // 自适应权重：越接近 1g 权重越大（兼容 g 或 m/s^2）
+    const gTrue=9.80665;
+    const an=a.length();
+    const ag = (an>5) ? an/gTrue : an; // 估个单位：>5 认为是 m/s^2
+    const dev = Math.abs(ag - 1); // 偏离 1g
+    const w = Math.max(0, Math.min(1, 1 - dev/0.5)); // 偏离>0.5g 则权重趋近0
+    const alpha = 0.02 + 0.18*w; // 0.02~0.2
+    gLP.multiplyScalar(1-alpha).addScaledVector(a, alpha);
+    if(gLP.lengthSq()<1e-12) return null;
+    gLP.normalize();
+    const worldUp=new THREE.Vector3(0,1,0);
+    // 传感器读的是“向下”的重力，加个负号对齐到世界向上
+    const qTilt=quatFromTwoVectors(gLP.clone().multiplyScalar(-1), worldUp);
+    return qTilt;
+  }
+
+  // ===== 姿态应用（四元数/欧拉/加速度） =====
+  function applyPose(pose){
+    if(!model) return;
+
+    const useAccel = document.getElementById('accelFusion').checked;
+
+    if(pose.quat){ // 四元数优先
+      const q = quantizeQuat(pose.quat, 1); // 小数点后一位 + 归一化
+      model.quaternion.set(q.x,q.y,q.z,q.w);
+    }else if([pose.yaw,pose.pitch,pose.roll].every(v=> typeof v==='number')){
+      const order=document.getElementById('eulerOrder').value;
+      const invY=document.getElementById('invYaw').checked?-1:1;
+      const invP=document.getElementById('invPitch').checked?-1:1;
+      const invR=document.getElementById('invRoll').checked?-1:1;
+      const isDeg=document.getElementById('deg').checked;
+      const y=isDeg?toRad(pose.yaw):pose.yaw;
+      const p=isDeg?toRad(pose.pitch):pose.pitch;
+      const r=isDeg?toRad(pose.roll):pose.roll;
+      const euler=new THREE.Euler(invP*p, invY*y, invR*r, order);
+      model.setRotationFromEuler(euler);
+    }else if(useAccel && pose.accel){ // 仅加速度：估计倾斜，保留 yaw
+      const qTilt=updateTiltFromAccel(pose.accel.x, pose.accel.y, pose.accel.z);
+      if(qTilt){
+        const e=new THREE.Euler().setFromQuaternion(model.quaternion,'YXZ');
+        const yaw=e.y;
+        const qYaw=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), yaw);
+        const qNew=qYaw.multiply(qTilt).normalize();
+        // 轻度平滑
+        model.quaternion.slerp(qNew, 0.3);
+      }
+    }
+    render();
+  }
+
+  // ===== 解析器（$GPCHC/四元数/欧拉/加速度） =====
+  function parseLine(line){
+    const s=line? line.trim():''; if(!s) return {};
+    const parts=s.split(',');
+
+    // 尝试任意位置四元数
+    function tryQuatAt(i){
+      const qx=+parts[i], qy=+parts[i+1], qz=+parts[i+2], qw=+parts[i+3];
+      if([qx,qy,qz,qw].every(Number.isFinite)){
+        const n=Math.hypot(qx,qy,qz,qw);
+        if(n>0.5 && n<1.5) return {quat:{x:qx/n,y:qy/n,z:qz/n,w:qw/n}};
+      }
+      return null;
+    }
+    for(let i=0;i<parts.length-3;i++){ const q=tryQuatAt(i); if(q) return q; }
+
+    // 尝试欧拉角（度或弧度，做宽松判断）
+    for(let i=0;i<Math.min(parts.length-2,24); i++){
+      const a=+parts[i], b=+parts[i+1], c=+parts[i+2];
+      if([a,b,c].every(Number.isFinite)){
+        // |角度|<=360 或者 |弧度|<=6.5
+        const ang = Math.max(Math.abs(a),Math.abs(b),Math.abs(c));
+        if(ang<=360 || ang<=6.5) return { yaw:a, pitch:b, roll:c };
+      }
+    }
+
+    // 尝试加速度三元组（g 或 m/s^2）
+    // 优先找带字段名的 ax/ay/az
+    const lower = parts.map(p=> (p||'').toLowerCase());
+    const idxAx = lower.findIndex(p=> p.includes('ax'));
+    if(idxAx>=0 && idxAx+1<parts.length){
+      const ax=+parts[idxAx+1], ay=+parts[idxAx+2], az=+parts[idxAx+3];
+      if([ax,ay,az].every(Number.isFinite)) return { accel:{x:ax,y:ay,z:az} };
+    }
+    // 否则用数值启发式：扫描所有相邻三元组，找范数最靠近 1g 或 9.8 的
+    let best=null, bestDev=1e9;
+    for(let i=0;i<parts.length-2;i++){
+      const ax=+parts[i], ay=+parts[i+1], az=+parts[i+2];
+      if(![ax,ay,az].every(Number.isFinite)) continue;
+      const n=Math.hypot(ax,ay,az);
+      const dev=Math.min(Math.abs(n-1), Math.abs(n-9.80665)); // g 或 m/s^2
+      if(dev<bestDev){ bestDev=dev; best={accel:{x:ax,y:ay,z:az}}; }
+    }
+    if(best && bestDev<5) return best; // 经验阈值
+
+    return {};
+  }
+
+  // ===== 数据源：本地目录（可选） & HTTP 默认 =====
+  let dirHandle=null, fileList=[], currentFile=null, timer=null, watcher=null, isPlaying=false, lastScanTs=0, currentMeta={mtime:0};
+  let busy=false, backoff=0;
+
+  // 本地目录模式
+  async function pickDirectory(){
+    try{
+      dirHandle=await window.showDirectoryPicker({id:'test_data_dir'});
+      document.getElementById('dirStatus').textContent='本地目录：'+dirHandle.name;
+      log('info','目录授权成功:',dirHandle.name);
+      if(document.getElementById('autoWatch').checked){ startAutoWatch(); }
+    }catch(e){ log('warn','已取消或失败：',e.message); }
+  }
+  async function scanFilesFS(){
+    const list=[];
+    for await (const [name,handle] of dirHandle.entries()){
+      if(!name.toLowerCase().endsWith('.txt')) continue;
+      try{ const f=await handle.getFile(); list.push({name,handle,mtime:f.lastModified,size:f.size}); }catch{}
+    }
+    function tsScore(n){ const m=n.match(/(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})/); if(!m) return 0; return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]); }
+    list.sort((a,b)=> tsScore(a.name)-tsScore(b.name) || a.mtime-b.mtime);
+    fileList=list; return fileList.length;
+  }
+  async function readTailPoseFS(fileHandle){
+    const f=await fileHandle.getFile();
+    const maxTail=64*1024, start=Math.max(0,f.size-maxTail);
+    const text=await f.slice(start,f.size).text();
+    const seg=start>0? text.replace(/^[^\n]*\n/, '') : text;
+    const lines=seg.split(/\r?\n/).filter(Boolean);
+    let line=''; for(let i=lines.length-1;i>=0;i--){ if(lines[i].includes('$GPCHC')){ line=lines[i]; break; } }
+    if(!line) line=lines[lines.length-1]||'';
+    return { pose: parseLine(line), name:f.name, mtime:f.lastModified };
+  }
+
+  // HTTP 模式（默认）
+  const HTTP_DIR='./test_data/';
+  async function scanFilesHTTP(){
+    const res=await fetch(HTTP_DIR,{cache:'no-cache'});
+    const html=await res.text();
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const links=[...doc.querySelectorAll('a')].map(a=> a.getAttribute('href')||'');
+    const txts=links.filter(h=> h.toLowerCase().endsWith('.txt'));
+    const list=[];
+    for(const name of txts){
+      const url=HTTP_DIR+name;
+      let mtime=0,size=0;
+      try{
+        const r=await fetch(url,{method:'HEAD',cache:'no-cache'});
+        const lm=r.headers.get('last-modified'); if(lm) mtime=+new Date(lm);
+        const cl=r.headers.get('content-length'); if(cl) size=+cl;
+      }catch{}
+      list.push({name,url,mtime,size});
+    }
+    function tsScore(n){ const m=n.match(/(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})/); if(!m) return 0; return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]); }
+    list.sort((a,b)=> tsScore(a.name)-tsScore(b.name) || a.mtime-b.mtime);
+    fileList=list; return fileList.length;
+  }
+  async function readTailPoseHTTP(file){
+    const maxTail=64*1024;
+    let size=file.size||0;
+    if(!size){
+      try{ const head=await fetch(file.url,{method:'HEAD',cache:'no-cache'}); size=+(head.headers.get('content-length')||0); }catch{}
+    }
+    let text='';
+    if(size>0){
+      const start=Math.max(0,size-maxTail);
+      try{
+        const r=await fetch(file.url,{headers:{'Range':`bytes=${start}-${size-1}`},cache:'no-cache'});
+        text=await r.text();
+      }catch{
+        const r=await fetch(file.url,{cache:'no-cache'}); const all=await r.text();
+        text=all.slice(Math.max(0,all.length-maxTail));
+      }
+      if(size>maxTail) text=text.replace(/^[^\n]*\n/,'');
+    }else{
+      const r=await fetch(file.url,{cache:'no-cache'}); text=await r.text();
+    }
+    const lines=text.split(/\r?\n/).filter(Boolean);
+    let line=''; for(let i=lines.length-1;i>=0;i--){ if(lines[i].includes('$GPCHC')){ line=lines[i]; break; } }
+    if(!line) line=lines[lines.length-1]||'';
+    return { pose: parseLine(line), name:file.name, mtime:Date.now() };
+  }
+
+  // 公共播放循环：本地目录优先，否则 HTTP
+  async function startPlayback(){
+    if(!model){ alert('请先加载 STL 或使用内置立方体'); return; }
+    const useFS=!!dirHandle;
+
+    const count = useFS ? await scanFilesFS() : await scanFilesHTTP().catch(()=>0);
+    if(count===0){ setStatus('等待数据...'); return; }
+
+    currentFile=fileList[fileList.length-1]||null;
+    currentMeta={mtime:0};
+    if(isPlaying) return;
+
+    isPlaying=true; setStatus('播放中...');
+    const baseInterval=Math.max(10, parseInt(document.getElementById('interval').value)||100);
+    const rate=parseFloat(document.getElementById('rate').value||1);
+    const rescanPeriod=Math.max(300, parseInt(document.getElementById('watchInterval').value)||1000);
+
+    timer && clearInterval(timer);
+    timer=setInterval(async ()=>{
+      if(busy) return; busy=true;
+      try{
+        const now=performance.now();
+        if(now-lastScanTs>rescanPeriod){
+          const n = useFS ? await scanFilesFS() : await scanFilesHTTP().catch(()=>0);
+          if(n>0) currentFile=fileList[fileList.length-1];
+          lastScanTs=now;
+        }
+        if(!currentFile){ setStatus('等待数据...'); return; }
+
+        if(useFS){
+          let f;
+          try{ f=await currentFile.handle.getFile(); }
+          catch(err){
+            backoff=Math.min(2000,Math.max(200,(backoff*1.7)|0));
+            log('warn','文件读取失败，退避',backoff,'ms：',err.message);
+            await new Promise(r=>setTimeout(r,backoff)); return;
+          }
+          if(f.lastModified===currentMeta.mtime){ backoff=0; return; }
+          currentMeta.mtime=f.lastModified; backoff=0;
+
+          const {pose,name}=await readTailPoseFS(currentFile.handle);
+          if(pose && (pose.quat || typeof pose.yaw==='number' || pose.accel)){
+            applyPose(pose);
+          }else{
+            log('warn','未解析到有效姿态');
+          }
+          log('info','刷新(FS):',name);
+        }else{
+          const {pose,name}=await readTailPoseHTTP(currentFile);
+          if(pose && (pose.quat || typeof pose.yaw==='number' || pose.accel)){
+            applyPose(pose);
+          }else{
+            log('warn','未解析到有效姿态');
+          }
+          log('info','刷新(HTTP):',name);
+        }
+      }catch(e){
+        log('error','解析失败',e.message);
+      }finally{ busy=false; }
+    }, baseInterval/Math.max(0.1,rate));
+  }
+
+  function stopPlayback(){ if(timer){ clearInterval(timer); timer=null; } isPlaying=false; setStatus('已停止'); }
+
+  function startAutoWatch(){
+    const enabled=document.getElementById('autoWatch').checked;
+    const period=Math.max(300, parseInt(document.getElementById('watchInterval').value)||1000);
+    if(!enabled){ stopAutoWatch(); return; }
+    if(watcher) clearInterval(watcher);
+    watcher=setInterval(async ()=>{
+      try{
+        const n = dirHandle ? await scanFilesFS() : await scanFilesHTTP().catch(()=>0);
+        if(n>0){ if(!isPlaying){ log('info','检测到数据，自动开始播放'); startPlayback(); } }
+        else { if(!isPlaying) setStatus('等待数据...'); }
+      }catch(e){ log('error','目录监测失败',e.message); }
+    }, period);
+    log('info','自动监测已开启，周期(ms)=',period);
+  }
+  function stopAutoWatch(){ if(watcher){ clearInterval(watcher); watcher=null; log('info','自动监测已停止'); } }
+
+  // 专注/全屏/可见性/尺寸
+  const chrome=document.getElementById('chrome'); const legend=document.getElementById('legend');
+  document.getElementById('focusMode').addEventListener('click', ()=>{ const hide=!chrome.classList.contains('hidden'); chrome.classList.toggle('hidden',hide); legend.classList.toggle('hidden',hide); render(); });
+  async function toggleFullscreen(){ try{ if(!document.fullscreenElement){ await document.documentElement.requestFullscreen(); } else { await document.exitFullscreen(); } }catch(err){ log('warn','全屏切换失败：',err.message);} }
+  document.getElementById('fullscreen').addEventListener('click', toggleFullscreen);
+  addEventListener('keydown', e=>{ if(e.key==='f'||e.key==='F') toggleFullscreen(); });
+  document.addEventListener('visibilitychange', ()=>{ if(document.hidden){ stopPlayback(); } else { if(!isPlaying && document.getElementById('autoWatch').checked){ startPlayback(); } }});
+  let resizeTid=null; addEventListener('resize', ()=>{ clearTimeout(resizeTid); resizeTid=setTimeout(()=>{ const w=innerWidth,h=innerHeight; camera.aspect=w/h; camera.updateProjectionMatrix(); renderer.setSize(w,h,false); render(); },120); });
+
+  // 绑定 UI
+  document.getElementById('pickDir').addEventListener('click', pickDirectory);
+  document.getElementById('start').addEventListener('click', startPlayback);
+  document.getElementById('stop').addEventListener('click', stopPlayback);
+  document.getElementById('autoWatch').addEventListener('change', ()=>{ stopAutoWatch(); startAutoWatch(); });
+  document.getElementById('watchInterval').addEventListener('change', ()=>{ stopAutoWatch(); startAutoWatch(); });
+  document.getElementById('presetSW').addEventListener('click', ()=> applyMouseMapping('sw'));
+  document.getElementById('presetDefault').addEventListener('click', ()=> applyMouseMapping('default'));
+  document.getElementById('gridToggle').addEventListener('change', e=>{ grid.visible=e.target.checked; render(); });
+  document.getElementById('axesToggle').addEventListener('change', e=>{ axes.visible=e.target.checked; render(); });
+
+  // 启动：内置立方体 + 自动监测 ./test_data/
+  (function(){ const g=new THREE.BoxGeometry(1,0.3,0.6); setModelGeometry(g); setStatus('待机'); render(); startAutoWatch(); })();
+})();
+</script>
+</body>
+</html>
