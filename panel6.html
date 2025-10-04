@@ -90,6 +90,8 @@
         <div class="row">
           <button id="presetSW" class="btn" title="SolidWorks风格交互">SW 预设</button>
           <button id="presetDefault" class="btn" title="three.js 默认交互">默认预设</button>
+          <!-- 新增：CHC 预设 -->
+          <button id="presetCHC" class="btn" title="CHC/INS HPR 约定映射">CHC 预设</button>
         </div>
       </div>
 
@@ -202,30 +204,58 @@
   const toRad=d=>d*Math.PI/180;
   function applyPose(pose){
     if(!model) return;
-    if(pose.quat){ model.quaternion.set(pose.quat.x,pose.quat.y,pose.quat.z,pose.quat.w); }
-    else if([pose.yaw,pose.pitch,pose.roll].every(v=> typeof v==='number')){
+    if(pose.quat){
+      model.quaternion.set(pose.quat.x,pose.quat.y,pose.quat.z,pose.quat.w);
+    }else if([pose.yaw,pose.pitch,pose.roll].every(v=> typeof v==='number')){
       const order=document.getElementById('eulerOrder').value;
       const invY=document.getElementById('invYaw').checked?-1:1;
       const invP=document.getElementById('invPitch').checked?-1:1;
       const invR=document.getElementById('invRoll').checked?-1:1;
       const isDeg=document.getElementById('deg').checked;
-      const y=isDeg?toRad(pose.yaw):pose.yaw, p=isDeg?toRad(pose.pitch):pose.pitch, r=isDeg?toRad(pose.roll):pose.roll;
-      const euler=new THREE.Euler(invP*p,invY*y,invR*r,order); // Y-up 映射：yaw→Y pitch→X roll→Z
+      const y=isDeg?toRad(pose.yaw):pose.yaw;   // yaw → Y
+      const p=isDeg?toRad(pose.pitch):pose.pitch; // pitch → X
+      const r=isDeg?toRad(pose.roll):pose.roll;   // roll → Z
+      const euler=new THREE.Euler(invP*p,invY*y,invR*r,order);
       model.setRotationFromEuler(euler);
     }
     render();
   }
 
-  // 解析器
+  // ======== 新增：$GPCHC 专用解析（HPR → Yaw/Pitch/Roll）========
+  function parseGPCHC(line){
+    // 形如：$GPCHC,2384,37069.60,194.50,-0.38,-0.77, ...
+    if(!line || !line.includes('$GPCHC')) return null;
+    const parts = line.trim().split(',');
+    if(parts.length < 6) return null;
+
+    const headingDeg = +parts[3];   // 顺时针 0~360（相对正北）
+    const pitchDeg   = +parts[4];   // 上仰为正
+    const rollDeg    = +parts[5];   // 右下倾为正
+
+    if([headingDeg,pitchDeg,rollDeg].some(v=>!Number.isFinite(v))) return null;
+
+    // three.js 右手系：逆时针为正 -> yaw 取负；roll 取反以统一右手系方向
+    return { yaw: -headingDeg, pitch: pitchDeg, roll: -rollDeg, _src:'GPCHC' };
+  }
+
+  // 解析器（优先识别 $GPCHC）
   function parseLine(line){
-    const s=line? line.trim():''; if(!s) return {};
+    // 1) 优先识别 $GPCHC
+    const g = parseGPCHC(line);
+    if (g) return g;
+
+    // 2) 否则保持原通用解析逻辑
+    const s=line? line.trim():'';
+    if(!s) return {};
     const parts=s.split(',');
+
     function tryQuatAt(i){
       const qx=+parts[i],qy=+parts[i+1],qz=+parts[i+2],qw=+parts[i+3];
       if([qx,qy,qz,qw].every(Number.isFinite)){ const n=Math.hypot(qx,qy,qz,qw); if(n>0.5 && n<1.5) return {quat:{x:qx/n,y:qy/n,z:qz/n,w:qw/n}}; }
       return null;
     }
     for(let i=0;i<parts.length-3;i++){ const q=tryQuatAt(i); if(q) return q; }
+
     for(let i=0;i<Math.min(parts.length-2,16); i++){
       const a=+parts[i], b=+parts[i+1], c=+parts[i+2];
       if([a,b,c].every(v=> Number.isFinite(v) && Math.abs(v)<=360)) return {yaw:a,pitch:b,roll:c};
@@ -412,6 +442,16 @@
   document.getElementById('presetDefault').addEventListener('click', ()=> applyMouseMapping('default'));
   document.getElementById('gridToggle').addEventListener('change', e=>{ grid.visible=e.target.checked; render(); });
   document.getElementById('axesToggle').addEventListener('change', e=>{ axes.visible=e.target.checked; render(); });
+
+  // 新增：CHC 预设（ZXY + 度制 + 不反号）
+  document.getElementById('presetCHC').addEventListener('click', ()=>{
+    document.getElementById('eulerOrder').value = 'ZXY';
+    document.getElementById('deg').checked = true;
+    document.getElementById('invYaw').checked = false;
+    document.getElementById('invPitch').checked = false;
+    document.getElementById('invRoll').checked = false;
+    log('info','姿态预设：CHC/INS（Heading 顺时针→逆时针、ZXY）');
+  });
 
   // 启动：默认装好内置立方体；自动监测 ./test_data/（HTTP 模式）
   (function(){ const g=new THREE.BoxGeometry(1,0.3,0.6); setModelGeometry(g); setStatus('待机'); render(); startAutoWatch(); })();
