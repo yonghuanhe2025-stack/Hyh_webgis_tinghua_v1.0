@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>本地瓦片加载器（简版｜适配 Esri 下载 {z}/{x}/{y}.jpg）</title>
+<style>
+  :root{ --bg:#0b1221; --panel:#111a2c; --text:#e7eefc; --muted:#8aa0c6; --accent:#38bdf8; --border:#263247; }
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft Yahei",sans-serif;}
+  #app{position:fixed;inset:0;display:grid;grid-template-columns:320px 1fr;gap:12px;padding:12px;box-sizing:border-box;}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.25);} 
+  .panel{padding:14px 14px 10px;display:flex;flex-direction:column;gap:10px;}
+  .panel h2{margin:0 0 6px;font-size:16px;color:var(--text);}  
+  .row{display:grid;grid-template-columns:110px 1fr;align-items:center;gap:8px;}
+  label{color:var(--muted);}  
+  input[type="text"],select{width:100%;padding:8px 10px;border-radius:10px;border:1px solid var(--border);background:#0e172a;color:var(--text);}  
+  button{padding:8px 12px;border-radius:10px;border:1px solid var(--border);background:linear-gradient(180deg,#12213b,#0f1a30);color:var(--text);cursor:pointer}
+  button:hover{filter:brightness(1.05)}
+  .muted{color:var(--muted);font-size:12px}
+  .sep{height:1px;background:var(--border);margin:6px 0}
+  #map{height:100%;width:100%;border-radius:12px}
+</style>
+<!-- 离线：将 Leaflet 放到 ./lib 目录（leaflet.css / leaflet.js） -->
+<link rel="stylesheet" href="./lib/leaflet.css">
+<script src="./lib/leaflet.js"></script>
+</head>
+<body>
+<div id="app">
+  <div class="card panel">
+    <h2>加载本地瓦片</h2>
+
+    <div class="row">
+      <label>瓦片根目录</label>
+      <div>
+        <button id="pickDir">选择文件夹（推荐）</button>
+        <div style="margin-top:6px">
+          <input id="dirInput" type="file" webkitdirectory directory multiple />
+          <div class="muted">（也可直接用此控件选择根目录）</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <label>目录结构</label>
+      <div class="muted"><code>{z}/{x}/{y}{ext}</code>（Esri下载脚本默认：<code>{z}/{x}/{y}.jpg</code>）</div>
+    </div>
+
+    <div class="row">
+      <label>瓦片扩展名</label>
+      <select id="ext">
+        <option>.jpg</option>
+        <option>.png</option>
+        <option>.jpeg</option>
+        <option>.webp</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>Y 轴方向</label>
+      <select id="flipY">
+        <option value="false">XYZ（上→下，适配本地 {z}/{x}/{y}）</option>
+        <option value="true">TMS（下→上）</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label>最小/最大层级</label>
+      <div style="display:flex;gap:8px">
+        <input id="minZ" type="text" value="0" style="width:80px"/>
+        <input id="maxZ" type="text" value="19" style="width:80px"/>
+      </div>
+    </div>
+
+    <div class="row">
+      <label>视图</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+        <input id="lat" type="text" value="31.4638" placeholder="纬度"/>
+        <input id="lng" type="text" value="120.6474" placeholder="经度"/>
+        <input id="zoom" type="text" value="5" placeholder="缩放"/>
+      </div>
+    </div>
+
+    <div class="row"><label></label><button id="loadFs">加载本地瓦片</button></div>
+    <div class="row"><label></label><button id="applyView">应用视图</button></div>
+
+    <div class="sep"></div>
+    <div class="muted">提示：建议用本地服务打开（如 <code>python -m http.server 8000</code>），或直接双击打开（部分浏览器限制下可能无法读取本地文件）。</div>
+  </div>
+  <div class="card"><div id="map"></div></div>
+</div>
+
+<script>
+(function(){
+  if (!window.L) {
+    alert('未找到 Leaflet。请将 ./lib/leaflet.css 和 ./lib/leaflet.js 放到 lib/ 目录。');
+    return;
+  }
+
+  const map = L.map('map', { zoomControl:true, preferCanvas:true }).setView([31.4638, 120.6474], 5);
+  L.gridLayer({ attribution: '本地瓦片加载器' }).addTo(map);
+
+  const pickDirBtn = document.getElementById('pickDir');
+  const dirInput = document.getElementById('dirInput');
+  const extSel = document.getElementById('ext');
+  const flipYSel = document.getElementById('flipY');
+  const minZ = document.getElementById('minZ');
+  const maxZ = document.getElementById('maxZ');
+  const lat = document.getElementById('lat');
+  const lng = document.getElementById('lng');
+  const zoom = document.getElementById('zoom');
+  const loadFs = document.getElementById('loadFs');
+  const applyView = document.getElementById('applyView');
+
+  // ---- 目录句柄（两种方式） ----
+  let chosenDirHandle = null;
+  pickDirBtn.addEventListener('click', async ()=>{
+    if(window.showDirectoryPicker){
+      try{ chosenDirHandle = await window.showDirectoryPicker(); }
+      catch(e){ console.warn(e); }
+    } else {
+      alert('浏览器不支持 showDirectoryPicker，可使用下方“选择文件夹”控件。');
+    }
+  });
+
+  dirInput.addEventListener('change', (e)=>{
+    // 用 FileList 构造伪目录句柄（兼容没 showDirectoryPicker 的浏览器）
+    const files = Array.from(e.target.files);
+    const mapP = new Map();
+    for (const f of files){ mapP.set(f.webkitRelativePath.replace(/^.*?\//,''), f); }
+    function makeHandle(prefix=''){
+      return {
+        async getFileHandle(name){
+          const isDir = files.some(f=>f.webkitRelativePath.replace(/^.*?\//,'').startsWith(prefix+name+"/"));
+          if(isDir){ return makeHandle(prefix+name+"/"); }
+          const f = mapP.get(prefix+name);
+          if(!f) throw new Error('文件不存在: '+prefix+name);
+          return { getFile: async ()=>f };
+        },
+        async getDirectoryHandle(name){ return makeHandle(prefix+name+"/"); }
+      };
+    }
+    chosenDirHandle = makeHandle('');
+    alert('已选择文件夹，可点击“加载本地瓦片”。');
+  });
+
+  // ---- 自定义 GridLayer：从本地目录读取瓦片 ----
+  const FSGridLayer = L.GridLayer.extend({
+    initialize: function(opts){ L.GridLayer.prototype.initialize.call(this, opts); this.dirHandle = opts.dirHandle; this.ext = opts.ext || '.jpg'; this.flipY = !!opts.flipY; },
+    createTile: function(coords, done){
+      const tile = document.createElement('img');
+      tile.alt = `${coords.z}/${coords.x}/${coords.y}`;
+      tile.style.width = '256px'; tile.style.height = '256px';
+      const invY = this.flipY ? (Math.pow(2, coords.z) - 1 - coords.y) : coords.y;
+      (async ()=>{
+        try {
+          const dirZ = await this.dirHandle.getDirectoryHandle(`${coords.z}`);
+          const dirX = await dirZ.getDirectoryHandle(`${coords.x}`);
+          const fh = await dirX.getFileHandle(`${invY}${this.ext}`);
+          const file = await fh.getFile();
+          const url = URL.createObjectURL(file);
+          tile.onload = ()=>{ URL.revokeObjectURL(url); done(null, tile); };
+          tile.onerror = ()=>{ done(new Error('加载失败'), tile); };
+          tile.src = url;
+        } catch (e){
+          // 兼容不同扩展名
+          const tryExts = ['.jpg','.png','.jpeg','.webp'];
+          for (const ex of tryExts){
+            try{
+              const dirZ2 = await this.dirHandle.getDirectoryHandle(`${coords.z}`);
+              const dirX2 = await dirZ2.getDirectoryHandle(`${coords.x}`);
+              const fh2 = await dirX2.getFileHandle(`${invY}${ex}`);
+              const f2 = await fh2.getFile();
+              const url2 = URL.createObjectURL(f2);
+              tile.onload = ()=>{ URL.revokeObjectURL(url2); done(null, tile); };
+              tile.onerror = ()=>{ done(new Error('加载失败'), tile); };
+              tile.src = url2; return;
+            }catch(_){/* 继续尝试 */}
+          }
+          done(e, tile);
+        }
+      })();
+      return tile;
+    }
+  });
+
+  function loadFsLayer(){
+    if(!chosenDirHandle){ alert('请先选择瓦片根目录。'); return; }
+    const ext = extSel.value;
+    const flipY = flipYSel.value === 'true';
+    const mz = parseInt(minZ.value)||0, MZ = parseInt(maxZ.value)||19;
+    const layer = new FSGridLayer({ dirHandle: chosenDirHandle, ext, flipY, minZoom:mz, maxZoom:MZ });
+    if (window.currentLayer) { map.removeLayer(window.currentLayer); }
+    window.currentLayer = layer.addTo(map);
+  }
+
+  loadFs.addEventListener('click', loadFsLayer);
+
+  applyView.addEventListener('click', ()=>{
+    const la = parseFloat(lat.value)||0, lo = parseFloat(lng.value)||0, z = parseInt(zoom.value)||5;
+    map.setView([la,lo], z);
+  });
+})();
+</script>
+</body>
+</html>

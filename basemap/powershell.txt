@@ -1,0 +1,8 @@
+powershell -ExecutionPolicy Bypass -File .\EsriTileDownloader.ps1 `
+  -Out Esri_map -MinZ 16 -MaxZ 19 -Concurrency 8 -Retry 3 -DelayMs 30 `
+  -West 120.6457 -South 31.4615 -East 120.6502 -North 31.4654
+
+powershell -ExecutionPolicy Bypass -File .\EsriTileDownloader.ps1 `
+  -Out Esri_map_z20_24 -MinZ 20 -MaxZ 24 -Concurrency 8 -Retry 3 -DelayMs 30 `
+  -West 120.64570 -South 31.46152 -East 120.65020 -North 31.46539
+
