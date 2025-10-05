@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>离线 glTF/GLB 本地查看器（three.js r146 非模块版）</title>
+  <!-- 使用说明（务必阅读）：
+    1) 将本 HTML 与如下 4 个脚本放同一目录（均取自 three.js r146 非模块版，支持 file:// 打开）：
+       - three.min.js            https://raw.githubusercontent.com/mrdoob/three.js/r146/build/three.min.js
+       - OrbitControls.js        https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/controls/OrbitControls.js
+       - GLTFLoader.js           https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/loaders/GLTFLoader.js
+       - DRACOLoader.js          https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/loaders/DRACOLoader.js
+
+       （可选，为了支持 Draco 压缩 glTF/GLB，请另把解码器放到 ./draco/ 目录：
+        https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/libs/draco/draco_decoder.js
+        https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/libs/draco/draco_wasm_wrapper.js
+        https://raw.githubusercontent.com/mrdoob/three.js/r146/examples/js/libs/draco/draco_decoder.wasm ）
+
+    2) 直接双击本 HTML（file://）即可离线使用，不需要搭建本地服务器。
+
+    3) 打开模型的三种方式：
+       - 方式 A：点击 “选择单个模型(.glb/.gltf)” 直接打开 .glb 或独立 .gltf（不含外链资源）。
+       - 方式 B：先点击 “选择模型所在文件夹(可包含贴图)” 选中模型目录，然后再选择 .gltf 主文件；
+                 程序会自动用文件夹中的贴图/.bin 解析相对路径（适合多文件 .gltf）。
+       - 方式 C：把文件或文件夹里的全部文件一并拖拽进来（建议同时把 .gltf/.bin/贴图一起拖拽）。
+
+    4) 常见打不开原因：
+       - .gltf 引用了相对路径资源（bin/贴图），但未提供所在目录；请用方式 B 或方式 C。
+       - 模型是 Draco 压缩的，但未放置 ./draco/ 解码器文件；请按上方说明添加。
+       - 模型过大显存不足；可勾选 “简易光照” 减负，或改用低模测试。
+  -->
+  <style>
+    :root{
+      --bg:#0b1221; --panel:#111a2c; --text:#e7eefc; --muted:#8aa0c6; --accent:#38bdf8; --line:#263247;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 system-ui,Segoe UI,Roboto,Helvetica,Arial,"PingFang SC","Hiragino Sans GB","Microsoft Yahei",sans-serif;}
+    #app{position:fixed;inset:0;display:grid;grid-template-columns:320px 1fr;grid-gap:12px;padding:12px;box-sizing:border-box;}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:10px;}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    label{opacity:.9}
+    input[type="file"],button,select{background:#0e1730;border:1px solid var(--line);color:var(--text);padding:8px 10px;border-radius:10px}
+    button{cursor:pointer}
+    button:hover{border-color:var(--accent)}
+    .hint{color:var(--muted);font-size:12px}
+    .kpis{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .kpis div{background:#0e1730;border:1px solid var(--line);border-radius:10px;padding:8px}
+    .kpis b{display:block;font-size:12px;color:var(--muted)}
+    #drop{flex:1;display:grid;place-items:center;border:1px dashed var(--line);border-radius:12px;background:#0d1527}
+    #drop.drag{border-color:var(--accent);background:#0d1b35}
+    canvas{display:block;width:100%;height:100%}
+    .toggles{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .footer{margin-top:auto;color:var(--muted);font-size:12px}
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="panel">
+    <h3 style="margin:6px 0 2px">离线 glTF/GLB 查看器</h3>
+    <div class="hint">three.js r146 非模块版 · 支持 file:// · 支持拖拽/多文件 .gltf</div>
+
+    <div class="row">
+      <label>选择单个模型：</label>
+      <input id="pickModel" type="file" accept=".glb,.gltf" />
+    </div>
+
+    <div class="row">
+      <label>选择模型所在文件夹：</label>
+      <input id="pickFolder" type="file" webkitdirectory directory multiple />
+    </div>
+
+    <div class="row">
+      <button id="fit">视角复位(F)</button>
+      <button id="clear">清空场景</button>
+      <button id="screenshot">截图</button>
+    </div>
+
+    <div class="toggles">
+      <label><input id="gridToggle" type="checkbox" checked /> 网格</label>
+      <label><input id="axesToggle" type="checkbox" checked /> 坐标轴</label>
+      <label><input id="lightToggle" type="checkbox" checked /> 简易光照</label>
+      <label><input id="shadowToggle" type="checkbox" /> 阴影</label>
+    </div>
+
+    <div class="kpis">
+      <div><b>文件</b><span id="fileInfo">—</span></div>
+      <div><b>尺寸</b><span id="sizeInfo">—</span></div>
+      <div><b>三角形</b><span id="triInfo">—</span></div>
+      <div><b>内存</b><span id="memInfo">—</span></div>
+    </div>
+
+    <div id="drop">拖拽 .glb / .gltf（连同 .bin/贴图 一起）到此区域</div>
+
+    <div class="footer">小技巧：双击场景可对焦；按住右键/滚轮查看帮助；模型过大时先用 .glb 试试。</div>
+  </div>
+
+  <div class="panel" style="padding:0;overflow:hidden">
+    <div id="viewport" style="width:100%;height:100%"></div>
+  </div>
+</div>
+
+<!-- three.js r146 非模块版脚本（请与本 HTML 同目录） -->
+<script src="./three.min.js"></script>
+<script src="./OrbitControls.js"></script>
+<script src="./GLTFLoader.js"></script>
+<script src="./DRACOLoader.js"></script>
+<script>
+(function(){
+  // 基本 three.js 场景
+  const container = document.getElementById('viewport');
+  const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  container.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1221);
+
+  const camera = new THREE.PerspectiveCamera(50, container.clientWidth/container.clientHeight, 0.01, 1e6);
+  camera.position.set(2.5, 1.8, 3.2);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+
+  // 网格/坐标轴
+  const grid = new THREE.GridHelper(10, 10, 0x3a6ff0, 0x24406f);
+  grid.material.opacity = 0.25; grid.material.transparent = true;
+  scene.add(grid);
+
+  const axes = new THREE.AxesHelper(1);
+  scene.add(axes);
+
+  // 光照
+  let hemi = new THREE.HemisphereLight(0xffffff, 0x223355, 1.0);
+  let dir = new THREE.DirectionalLight(0xffffff, 1.0);
+  dir.position.set(3, 6, 3);
+  dir.castShadow = false;
+  scene.add(hemi, dir);
+
+  // 状态
+  let currentRoot = null; // THREE.Group
+  let mixerList = [];     // 动画
+
+  // Draco 支持（可选）
+  const dracoLoader = new THREE.DRACOLoader();
+  dracoLoader.setDecoderPath('./draco/'); // 请把解码器放这里
+
+  // GLTF Loader
+  const gltfLoader = new THREE.GLTFLoader();
+  gltfLoader.setDRACOLoader(dracoLoader);
+
+  // 文件映射：用于 .gltf 引用相对路径资源
+  let fileMap = new Map();
+  function refreshURLModifier(){
+    gltfLoader.setURLModifier((url) => {
+      // 去掉查询与哈希，匹配文件名或相对路径
+      const clean = url.split('?')[0].split('#')[0];
+      // 先尝试完整相对路径匹配
+      if (fileMap.has(clean)) return fileMap.get(clean);
+      // 再尝试仅按文件名匹配
+      const name = clean.split('/').pop();
+      if (fileMap.has(name)) return fileMap.get(name);
+      return url;
+    });
+  }
+
+  // 资源释放
+  function disposeObject3D(obj){
+    obj.traverse((child)=>{
+      if (child.isMesh){
+        if (child.geometry) child.geometry.dispose();
+        if (child.material){
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach(m=>{
+            for (const k in m){
+              const v = m[k];
+              if (v && v.isTexture){ v.dispose(); }
+            }
+            m.dispose && m.dispose();
+          });
+        }
+      }
+    });
+  }
+
+  // 适配视角
+  function fitView(target){
+    const box = new THREE.Box3().setFromObject(target);
+    if (!isFinite(box.min.x) || !isFinite(box.max.x)) return;
+    const size = new THREE.Vector3();
+    const center = new THREE.Vector3();
+    box.getSize(size); box.getCenter(center);
+
+    const maxSize = Math.max(size.x, size.y, size.z);
+    const fitDist = maxSize / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov/2)));
+
+    const dirVec = new THREE.Vector3(1, 0.6, 1).normalize();
+    camera.position.copy(center).addScaledVector(dirVec, fitDist*1.4 + 0.5);
+    camera.near = Math.max(0.01, maxSize/1000);
+    camera.far  = Math.max(1000, 10 * (fitDist + maxSize));
+    camera.updateProjectionMatrix();
+    controls.target.copy(center);
+    controls.update();
+
+    // UI 显示尺寸
+    document.getElementById('sizeInfo').textContent = `${size.x.toFixed(3)} × ${size.y.toFixed(3)} × ${size.z.toFixed(3)}`;
+  }
+
+  // 统计信息
+  function updateStats(root, gltf){
+    // 三角形统计
+    let tri = 0;
+    root.traverse((ch)=>{
+      if (ch.isMesh && ch.geometry){
+        const index = ch.geometry.index;
+        if (index) tri += index.count / 3; else tri += ch.geometry.attributes.position.count / 3;
+      }
+    });
+    document.getElementById('triInfo').textContent = tri.toLocaleString();
+
+    // 文件信息
+    const fileInfo = gltf && gltf.parser && gltf.parser.fileName ? gltf.parser.fileName : (root.name || '—');
+    document.getElementById('fileInfo').textContent = fileInfo;
+
+    // 内存（粗略估计）
+    const info = renderer.info;
+    const memText = `geometries: ${info.memory.geometries}, textures: ${info.memory.textures}`;
+    document.getElementById('memInfo').textContent = memText;
+  }
+
+  // 清空场景
+  function clearScene(){
+    mixerList.forEach(m=>m.uncacheRoot && m.uncacheRoot(m.getRoot && m.getRoot()));
+    mixerList = [];
+    if (currentRoot){ disposeObject3D(currentRoot); scene.remove(currentRoot); currentRoot = null; }
+    renderer.renderLists && renderer.renderLists.dispose && renderer.renderLists.dispose();
+    document.getElementById('fileInfo').textContent = '—';
+    document.getElementById('sizeInfo').textContent = '—';
+    document.getElementById('triInfo').textContent = '—';
+    document.getElementById('memInfo').textContent = '—';
+  }
+
+  // 加载主流程
+  async function loadFromObjectURL(url, fileName){
+    try{
+      clearScene();
+      const gltf = await new Promise((resolve, reject)=>{
+        gltfLoader.load(url, resolve, undefined, reject);
+      });
+      currentRoot = gltf.scene || gltf.scenes?.[0] || new THREE.Group();
+      currentRoot.name = fileName || 'model';
+
+      // 阴影设置
+      const wantShadow = document.getElementById('shadowToggle').checked;
+      renderer.shadowMap.enabled = wantShadow;
+      const shadowType = THREE.PCFSoftShadowMap; // 默认更柔和
+      renderer.shadowMap.type = shadowType;
+      currentRoot.traverse((ch)=>{
+        if (ch.isMesh){ ch.castShadow = wantShadow; ch.receiveShadow = wantShadow; }
+      });
+
+      scene.add(currentRoot);
+      fitView(currentRoot);
+      updateStats(currentRoot, gltf);
+
+      // 动画（如有）
+      if (gltf.animations && gltf.animations.length){
+        const mixer = new THREE.AnimationMixer(currentRoot);
+        gltf.animations.forEach(clip=>mixer.clipAction(clip).play());
+        mixerList.push(mixer);
+      }
+
+    }catch(err){
+      console.error(err);
+      alert('加载失败：' + (err?.message || err));
+    }
+  }
+
+  // --- 事件与交互 ---
+  // 布尔开关
+  document.getElementById('gridToggle').addEventListener('change', e=>{ grid.visible = e.target.checked; });
+  document.getElementById('axesToggle').addEventListener('change', e=>{ axes.visible = e.target.checked; });
+  document.getElementById('lightToggle').addEventListener('change', e=>{
+    const on = e.target.checked; hemi.visible = on; dir.visible = on;
+  });
+  document.getElementById('shadowToggle').addEventListener('change', e=>{
+    const on = e.target.checked; renderer.shadowMap.enabled = on; if (currentRoot){ currentRoot.traverse(ch=>{ if (ch.isMesh){ ch.castShadow = on; ch.receiveShadow = on; } }); }
+  });
+
+  // 视角复位
+  document.getElementById('fit').addEventListener('click', ()=>{ if (currentRoot) fitView(currentRoot); });
+
+  // 截图
+  document.getElementById('screenshot').addEventListener('click', ()=>{
+    const link = document.createElement('a');
+    link.download = (currentRoot?.name || 'screenshot') + '.png';
+    link.href = renderer.domElement.toDataURL('image/png');
+    link.click();
+  });
+
+  // 清空
+  document.getElementById('clear').addEventListener('click', clearScene);
+
+  // 单文件（.glb / .gltf）选择
+  document.getElementById('pickModel').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if (!f) return;
+    // 重置文件映射，但保留可能已经选过的文件夹映射
+    for (const [k,v] of fileMap){ /* 保留目录映射 */ }
+    const url = URL.createObjectURL(f);
+    gltfLoader.parser && (gltfLoader.parser.fileName = f.name);
+    await loadFromObjectURL(url, f.name);
+  });
+
+  // 选择目录（用于 .gltf 及其相对资源）
+  document.getElementById('pickFolder').addEventListener('change', (e)=>{
+    const files = Array.from(e.target.files || []);
+    fileMap.clear();
+    // 建立相对路径 -> objectURL 映射
+    files.forEach(f=>{
+      const rel = (f.webkitRelativePath || f.name).replace(/^[\\/]+/, '');
+      fileMap.set(rel, URL.createObjectURL(f));
+      fileMap.set(f.name, fileMap.get(rel));
+    });
+    refreshURLModifier();
+    alert('已索引目录文件，共 ' + files.length + ' 个。现在再选择 .gltf 主文件，或直接拖拽 .gltf 进来。');
+  });
+
+  // 拖拽支持（可一次性把 .gltf/.bin/贴图 一起拖进来）
+  const drop = document.getElementById('drop');
+  const prevent = e=>{ e.preventDefault(); e.stopPropagation(); };
+  ['dragenter','dragover','dragleave','drop'].forEach(evt=>{
+    drop.addEventListener(evt, prevent);
+  });
+  drop.addEventListener('dragenter', ()=> drop.classList.add('drag'));
+  drop.addEventListener('dragleave', ()=> drop.classList.remove('drag'));
+  drop.addEventListener('drop', async (e)=>{
+    drop.classList.remove('drag');
+    const items = e.dataTransfer.items;
+    let files = [];
+    if (items && items.length && items[0].webkitGetAsEntry){
+      // 展开目录
+      async function walkEntry(entry, path=''){
+        return new Promise(resolve =>{
+          if (entry.isFile){ entry.file(f=>{ f.relPath = path + entry.name; resolve([f]); }); }
+          else if (entry.isDirectory){
+            const reader = entry.createReader();
+            reader.readEntries(async entries=>{
+              const all = await Promise.all(entries.map(en=>walkEntry(en, path + entry.name + '/')));
+              resolve(all.flat());
+            });
+          } else resolve([]);
+        });
+      }
+      const tasks = [];
+      for (const it of items){ const en = it.webkitGetAsEntry(); if (en) tasks.push(walkEntry(en)); }
+      files = (await Promise.all(tasks)).flat();
+    }else{
+      files = Array.from(e.dataTransfer.files);
+    }
+
+    // 建图
+    fileMap.clear();
+    files.forEach(f=>{
+      const rel = (f.relPath || f.webkitRelativePath || f.name).replace(/^[\\/]+/, '');
+      const url = URL.createObjectURL(f);
+      fileMap.set(rel, url); fileMap.set(f.name, url);
+    });
+    refreshURLModifier();
+
+    // 找到一个主模型文件
+    const model = files.find(f=>/\.(glb|gltf)$/i.test(f.name));
+    if (!model){ alert('未发现 .glb/.gltf 文件，请连同 .gltf 主文件一起拖入。'); return; }
+    await loadFromObjectURL(fileMap.get(model.name), model.name);
+  });
+
+  // 双击对焦
+  renderer.domElement.addEventListener('dblclick', ()=>{ if (currentRoot) fitView(currentRoot); });
+
+  // resize
+  window.addEventListener('resize', ()=>{
+    const w = container.clientWidth, h = container.clientHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w/h; camera.updateProjectionMatrix();
+  });
+
+  // 渲染循环
+  const clock = new THREE.Clock();
+  function animate(){
+    const dt = clock.getDelta();
+    mixerList.forEach(m=>m.update(dt));
+    controls.update();
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+  }
+  animate();
+
+  // 键盘 F = 视角复位
+  window.addEventListener('keydown', (e)=>{ if (e.key.toLowerCase()==='f') document.getElementById('fit').click(); });
+})();
+</script>
+</body>
+</html>
